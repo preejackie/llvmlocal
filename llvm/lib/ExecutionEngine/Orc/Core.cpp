@@ -1607,8 +1607,9 @@ JITDylib *ExecutionSession::getJITDylibByName(StringRef Name) {
 
 JITDylib &ExecutionSession::createJITDylib(std::string Name,
                                            bool AddToMainDylibSearchOrder) {
-  assert(!getJITDylibByName(Name) && "JITDylib with that name already exists");
   return runSessionLocked([&, this]() -> JITDylib & {
+    assert(!getJITDylibByName(Name) &&
+           "JITDylib with that name already exists");
     JDs.push_back(
         std::unique_ptr<JITDylib>(new JITDylib(*this, std::move(Name))));
     if (AddToMainDylibSearchOrder)
