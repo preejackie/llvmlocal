@@ -102,9 +102,9 @@ public:
         return llvm::make_unique<LazyJIT>(std::move(*MchBuilder),std::move(*DL),std::move(triple));
     }
 
-    Error addModule(std::unique_ptr<Module> M){
+    Error addModule(ThreadSafeModule M){
 
-        return LazyStubs.add(ES.getMainJITDylib(),ThreadSafeModule(std::move(M),TSC));
+        return LazyStubs.add(ES.getMainJITDylib(),std::move(M));
     }
     void loadCurrentProcessSymbols(StringRef JName){
        ES.getJITDylibByName(JName)->setGenerator(cantFail(DynamicLibrarySearchGenerator::GetForCurrentProcess(DL.getGlobalPrefix())));
@@ -142,29 +142,28 @@ int main()
     InitializeNativeTarget();
     InitializeNativeTargetAsmPrinter();
 
-    LLVMContext ContextIn;
-    SMDiagnostic error;
+    SMDiagnostic error1,error2,error3;
 
     auto JITEngine = LazyJIT::CreateJITEngine();
     if(!JITEngine)
         JITEngine.takeError();
 
-    auto mainll = parseIRFile("myapp.ll",error,ContextIn);      
-    auto lib    = parseIRFile("appfns.ll",error,ContextIn);
-    auto lib2   = parseIRFile("appdata.ll",error,ContextIn);
     
-    
-    auto G = (**JITEngine).addModule(std::move(mainll));
-    if(G){
+    ThreadSafeContext Ctx1(llvm::make_unique<LLVMContext>());
+    auto M1 = parseIRFile("myapp.ll", error1,*Ctx1.getContext());
+    auto G = (**JITEngine).addModule(ThreadSafeModule(std::move(M1), std::move(Ctx1)));
+    if(G){}
 
-    }  
-     
-    auto l1 = (**JITEngine).addModule(std::move(lib));
-    if(l1){
-    }
-    auto l2 = (**JITEngine).addModule(std::move(lib2));
-   if(l2){
-   }
+    ThreadSafeContext Ctx2(llvm::make_unique<LLVMContext>());
+    auto M2 = parseIRFile("appfns.ll",error2,*Ctx2.getContext());
+    auto h1 = (**JITEngine).addModule(ThreadSafeModule(std::move(M2), std::move(Ctx2)));
+    if(h1){}
+    
+    ThreadSafeContext Ctx3(llvm::make_unique<LLVMContext>());
+    auto M3 = parseIRFile("appdata.ll",error3,*Ctx3.getContext());
+    auto h = (**JITEngine).addModule(ThreadSafeModule(std::move(M3), std::move(Ctx3)));
+    if(h){}
+
 
     auto R = (**JITEngine).lookup("main");
     if(!R){
