@@ -1716,13 +1716,16 @@ void ExecutionSession::lookup(
   // outstanding MUs in case this query depends on them, otherwise this lookup
   // will starve waiting for a result from an MU that is stuck in the queue.
   runOutstandingMUs();
-
+ // llvm::errs() << "\n In Async Lookup ";
+ // for(auto& S : Symbols){
+ //   llvm::errs() << "\n For Symbol : "<<S;
+ // }
   auto Unresolved = std::move(Symbols);
   std::map<JITDylib *, MaterializationUnitList> CollectedMUsMap;
   auto Q = std::make_shared<AsynchronousSymbolQuery>(Unresolved, RequiredState,
                                                      std::move(NotifyComplete));
   bool QueryComplete = false;
-
+  //llvm::errs() <<"\n Query Address is : " << Q.get();
   auto LodgingErr = runSessionLocked([&]() -> Error {
     auto LodgeQuery = [&]() -> Error {
       for (auto &KV : SearchOrder) {

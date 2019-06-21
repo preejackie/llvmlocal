@@ -24,15 +24,15 @@ namespace llvm {
 namespace orc {
 
 // Imap methods
-void Imap::saveImpls(SymbolAliasMap ImplMaps, JITDylib *SrcJD) {
+void Imap::trackImpls(SymbolAliasMap ImplMaps, JITDylib *SrcJD) {
   std::lock_guard<std::mutex> lockit(ConcurrentAccess);
-  for (auto &I : ImplMaps) {
-    recordImpl(I.first, {I.second.Aliasee, SrcJD});
+  for (auto &I : ImplMaps){
+    auto It = Maps.insert({I.first, {I.second.Aliasee, SrcJD}});
+    assert (It.second && "ImplSymbols are already tracked for this Symbol?");
   }
 }
 
 // Speculator methods
-
 void Speculator::registerSymbolsWithAddr(TargetFAddr ImplAddr,
                                          SymbolNameSet likelySymbols) {
   std::lock_guard<std::mutex> lockit(ConcurrentAccess);
@@ -40,15 +40,13 @@ void Speculator::registerSymbolsWithAddr(TargetFAddr ImplAddr,
 }
 
 void Speculator::speculateFor(JITTargetAddress FAddr) {
-  std::lock_guard<std::mutex> lockit(ConcurrentAccess);
   launchCompile(FAddr);
 }
 
-// SpeculationLayer methods
 
 void SpeculationLayer::emit(MaterializationResponsibility R,
                             ThreadSafeModule TSM) {
-  auto Module = TSM.getModule();
+auto Module = TSM.getModule();
   assert(Module && "Speculation Layer received Null Module");
   auto &ESession = this->getExecutionSession();
   auto &InContext = Module->getContext();
@@ -66,9 +64,9 @@ void SpeculationLayer::emit(MaterializationResponsibility R,
     auto Candidates = Walker(Fn);
     // callees
     if (!Candidates.empty()) {
-      Mutator.SetInsertPoint(&(Fn.getEntryBlock().front()));
-      auto ImplAddrToUint =
-          Mutator.CreatePtrToInt(&Fn, Type::getInt64Ty(InContext));
+     Mutator.SetInsertPoint(&(Fn.getEntryBlock().front()));
+     auto ImplAddrToUint =
+         Mutator.CreatePtrToInt(&Fn, Type::getInt64Ty(InContext));
       Mutator.CreateCall(RTFTy, RTFn, {ImplAddrToUint});
       auto FuncName = ESession.intern(Fn.getName());
       SymbolsToMap[FuncName] = internAllFns(std::move(Candidates));
@@ -76,22 +74,22 @@ void SpeculationLayer::emit(MaterializationResponsibility R,
   }
 
   assert(!verifyModule(*Module) && "Speculation Instrumentation breaks IR?");
-  auto &SpecMap = getSpeculator();
+  auto &SpecMap = S;
   for (auto &Symbol : SymbolsToMap) {
     auto Target = Symbol.first;
-    auto likely = Symbol.second;
-    // Appending Queries on the same symbol but with different callback action
+    auto Likely = Symbol.second;
+    // Appending Queries on the same symbol but with different callback
     ESession.lookup(
         JITDylibSearchList({{&R.getTargetJITDylib(), false}}),
-        SymbolNameSet({Symbol.first}), SymbolState::Resolved,
-        [&SpecMap, likely, Target, &ESession](Expected<SymbolMap> ResSymMap) {
+        SymbolNameSet({Target}), SymbolState::Ready,
+        [&SpecMap, Likely, Target, &ESession](Expected<SymbolMap> ResSymMap) {
           if (ResSymMap) {
             auto RAddr = (*ResSymMap)[Target].getAddress();
-            SpecMap.registerSymbolsWithAddr(std::move(RAddr), likely);
+            SpecMap.registerSymbolsWithAddr(RAddr,Likely);
+            SpecMap.speculateFor(RAddr);
           } else {
             ESession.reportError(ResSymMap.takeError());
-            return; // fail MaterializationResponsibility is called by first
-                    // queued query.
+            return;
           }
         },
         NoDependenciesToRegister);
@@ -99,17 +97,8 @@ void SpeculationLayer::emit(MaterializationResponsibility R,
   NextLayer.emit(std::move(R), std::move(TSM));
 }
 
-DenseSet<SymbolStringPtr> SpeculationLayer::internAllFns(WalkerResultTy &&AR) {
-  DenseSet<SymbolStringPtr> Symbols;
-  auto &ESession = this->getExecutionSession();
-  for (auto Name : AR) {
-    Symbols.insert(ESession.intern(Name->getName()));
-  }
-  return Symbols;
-}
-
-SpeculationLayer::WalkerResultTy SpeculationLayer::Walk(const Function &F) {
-  WalkerResultTy Candidates;
+SpeculationLayer::CalleSet SpeculationLayer::Walk(const Function &F) {
+  CalleSet Candidates;
   for (auto &BB : F) {
     for (auto &I : BB) {
       if (auto Call = (dyn_cast<CallInst>(&I))) {
@@ -126,6 +115,13 @@ SpeculationLayer::WalkerResultTy SpeculationLayer::Walk(const Function &F) {
   }
   return Candidates;
 }
+DenseSet<SymbolStringPtr> SpeculationLayer::internAllFns(CalleSet &&AR) {
+  DenseSet<SymbolStringPtr> Symbols;
+   auto &ESession = this->getExecutionSession();
+   for (auto Name : AR)
+     Symbols.insert(ESession.intern(Name->getName()));
+   return Symbols;
+ }
 
 } // namespace orc
 } // namespace llvm

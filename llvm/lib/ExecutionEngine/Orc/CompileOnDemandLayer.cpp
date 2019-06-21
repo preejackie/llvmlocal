@@ -269,6 +269,7 @@ void CompileOnDemandLayer::emitPartition(
   // Ok -- we actually need to partition the symbols. Promote the symbol
   // linkages/names.
   // FIXME: We apply this once per partitioning. It's safe, but overkill.
+  /*
   {
     auto PromotedGlobals = PromoteSymbols(*TSM.getModule());
     if (!PromotedGlobals.empty()) {
@@ -284,7 +285,7 @@ void CompileOnDemandLayer::emitPartition(
       }
     }
   }
-
+  */
   expandPartition(*GVsToExtract);
 
   // Extract the requested partiton (plus any necessary aliases) and

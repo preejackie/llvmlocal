@@ -45,7 +45,6 @@ public:
     auto RegisterDependencies = [&](const SymbolDependenceMap &Deps) {
       MR.addDependenciesForAll(Deps);
     };
-
     JITDylibSearchList SearchOrder;
     MR.getTargetJITDylib().withSearchOrderDo(
         [&](const JITDylibSearchList &JDs) { SearchOrder = JDs; });

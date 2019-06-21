@@ -1218,9 +1218,9 @@ void RuntimeDyldImpl::finalizeAsync(
     Symbols.insert(Name);
   }
 
-  if (!Symbols.empty()) {
+  if (!Symbols.empty())
     SharedThis->Resolver.lookup(Symbols, PostResolveContinuation);
-  } else
+ else
     PostResolveContinuation(std::map<StringRef, JITEvaluatedSymbol>());
 }
 

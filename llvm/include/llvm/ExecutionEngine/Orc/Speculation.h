@@ -28,30 +28,25 @@ namespace orc {
 
 class Speculator;
 
-// Track the Impl JITDylibs of Symbols while lazy call through trampolines
-// are created and send the impl details to GlobalSpeculationObserver
+// Track the Impls (JITDylib,Symbols) of Symbols while lazy call through trampolines
+// are created. Operations are guarded by locks tp ensure that Imap stays in consistent
+// state after read/write
 
 class Imap {
   friend class Speculator;
 
 public:
   using ImplPair = std::pair<SymbolStringPtr, JITDylib *>;
-  using ImapTy = DenseMap<SymbolStringPtr, ImplPair>;
-  void saveImpls(SymbolAliasMap ImplMaps, JITDylib *SrcJD);
+  using ImapTy   = DenseMap<SymbolStringPtr, ImplPair>;
+
+  void trackImpls(SymbolAliasMap ImplMaps, JITDylib *SrcJD);
 
 private:
-  void recordImpl(SymbolStringPtr FaceSymbol, ImplPair Implementations) {
-    auto It = Maps.insert({FaceSymbol, Implementations});
-    if (It.second == false)
-      assert(0 && "Source Entities are already tracked for this Symbol?");
-  }
-
-  ImplPair getImplFor(SymbolStringPtr StubAddr) {
+  ImplPair getImplFor(const SymbolStringPtr& StubAddr) {
+    std::lock_guard<std::mutex> Lockit(ConcurrentAccess);
     auto Position = Maps.find(StubAddr);
-    if (Position != Maps.end()) {
-      return Position->getSecond();
-    }
-    assert(0 && "Source Entities are not tracked for a Symbol?");
+    assert(Position != Maps.end() && "ImplSymbols are not tracked for this Symbol?");
+    return Position->getSecond();
   }
 
   std::mutex ConcurrentAccess;
@@ -59,33 +54,50 @@ private:
 };
 
 class Speculator {
-
 public:
-  using TargetFAddr = JITTargetAddress;
+
+
+  using TargetFAddr    = JITTargetAddress;
   using SpeculationMap = DenseMap<TargetFAddr, SymbolNameSet>;
 
-  Speculator(Imap &Impl) : AliaseeImplTable(Impl) {}
+  explicit Speculator(Imap &Impl,ExecutionSession& ref) : AliaseeImplTable(Impl),ES(ref){}
 
   // Speculation Layer registers likely function through this method.
   void registerSymbolsWithAddr(TargetFAddr, SymbolNameSet);
 
+  // Non-runtime overload for registeration
+  void materializeOnLookup(SymbolNameSet,ExecutionSession&);
+
   // Speculatively compile likely functions for the given Stub Address.
+  // destination of __orc_speculate_for jump
   void speculateFor(JITTargetAddress);
+
+
+  Imap& getImapRef(){
+    return AliaseeImplTable;
+  }
 
 private:
   void launchCompile(JITTargetAddress FAddr) {
     auto It = GlobalSpecMap.find(FAddr);
-    if (It != GlobalSpecMap.end()) {
-      for (auto &Pos : It->getSecond()) {
-        auto SourceEntities = AliaseeImplTable.getImplFor(Pos);
+    assert(It != GlobalSpecMap.end() && "launching speculative compiles for unexpected function address?");
+      for (auto &Calle : It->getSecond()){
+        auto ImplSymbol = AliaseeImplTable.getImplFor(Calle);
+        const auto& ImplSymbolName = ImplSymbol.first;
+        auto* ImplJD = ImplSymbol.second;
+        ES.lookup(JITDylibSearchList({{ImplJD, true}}), SymbolNameSet({ImplSymbolName}),
+          SymbolState::Ready,
+          [this](Expected<SymbolMap> Result) {
+            if (auto Err = Result.takeError())
+            ES.reportError(std::move(Err));
+          },NoDependenciesToRegister);
       }
-    } else
-      assert(0 && "launching compiles for Unexpected Function Address?");
   }
 
   std::mutex ConcurrentAccess;
   Imap &AliaseeImplTable;
   SpeculationMap GlobalSpecMap;
+  ExecutionSession& ES;
 };
 
 // Walks the LLVM Module and collect likely functions for each LLVM Function if
@@ -93,9 +105,10 @@ private:
 // Construct IR level function mapping.
 
 class SpeculationLayer : public IRLayer {
+
 public:
-  using WalkerResultTy = DenseSet<Function *>;
-  using WalkerTy = std::function<WalkerResultTy(const Function &)>;
+  using CalleSet = DenseSet<Function *>;
+  using WalkerTy = std::function<CalleSet(const Function &)>;
 
   SpeculationLayer(ExecutionSession &ES, IRCompileLayer &BaseLayer,
                    Speculator &Spec)
@@ -110,9 +123,11 @@ public:
 
   Speculator &getSpeculator() const { return S; }
 
-  static WalkerResultTy Walk(const Function &);
+  IRCompileLayer& getCompileLayer() const {return NextLayer; }
 
-  DenseSet<SymbolStringPtr> internAllFns(WalkerResultTy &&AR);
+  static CalleSet Walk(const Function &);
+
+  DenseSet<SymbolStringPtr> internAllFns(CalleSet &&AR);
 
 private:
   IRCompileLayer &NextLayer;

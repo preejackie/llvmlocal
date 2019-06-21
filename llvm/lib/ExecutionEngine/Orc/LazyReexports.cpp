@@ -171,7 +171,7 @@ void LazyReexportsMaterializationUnit::materialize(
   }
   // enable speculative compilation
   if (AliaseeTable != nullptr)
-    AliaseeTable->saveImpls(RequestedAliases, &SourceJD);
+    AliaseeTable->trackImpls(RequestedAliases, &SourceJD);
 
   if (auto Err = ISManager.createStubs(StubInits)) {
     SourceJD.getExecutionSession().reportError(std::move(Err));

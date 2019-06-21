@@ -196,7 +196,7 @@ createLocalIndirectStubsManagerBuilder(const Triple &T) {
           return llvm::make_unique<
                       orc::LocalIndirectStubsManager<orc::OrcMips64>>();
       };
-      
+
     case Triple::x86_64:
       if (T.getOS() == Triple::OSType::Win32) {
         return [](){
@@ -255,7 +255,6 @@ std::vector<GlobalValue *> SymbolLinkagePromoter::operator()(Module &M) {
 
   for (auto &GV : M.global_values()) {
     bool Promoted = true;
-
     // Rename if necessary.
     if (!GV.hasName())
       GV.setName("__orc_anon." + Twine(NextId++));
