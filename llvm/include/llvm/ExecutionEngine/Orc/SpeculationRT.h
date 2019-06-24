@@ -15,7 +15,7 @@
 namespace llvm {
 namespace orc {
 extern "C" {
-void __orc_speculate_for(uint64_t stub_id);
+void __orc_speculate_for(void* Ptr,uint64_t stub_id);
 }
 } // namespace orc
 } // namespace llvm

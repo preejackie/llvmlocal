@@ -7,16 +7,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/ExecutionEngine/Orc/SpeculationRt.h"
-
+#include "llvm/ExecutionEngine/Orc/SpeculationRT.h"
+#include "llvm/ExecutionEngine/Orc/Speculation.h"
+#include "llvm/ExecutionEngine/Orc/CompileOnDemandLayer.h"
+#include "llvm/ExecutionEngine/JITSymbol.h"
 #include "llvm/Support/raw_ostream.h"
 
 #define DEBUG_TYPE "orc"
 
 namespace llvm {
 namespace orc {
-extern "C" void __orc_speculate_for(uint64_t StubId) {
+// Ptr to the Speculator instance
+extern "C" void __orc_speculate_for(void* Ptr, uint64_t StubId) {
   // trigger compilation
+assert(Ptr && "Null Address Received in orc_speculate_for ");
 }
 } // namespace orc
 } // namespace llvm

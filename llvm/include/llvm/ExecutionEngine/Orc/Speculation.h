@@ -28,24 +28,25 @@ namespace orc {
 
 class Speculator;
 
-// Track the Impls (JITDylib,Symbols) of Symbols while lazy call through trampolines
-// are created. Operations are guarded by locks tp ensure that Imap stays in consistent
-// state after read/write
+// Track the Impls (JITDylib,Symbols) of Symbols while lazy call through
+// trampolines are created. Operations are guarded by locks tp ensure that Imap
+// stays in consistent state after read/write
 
 class Imap {
   friend class Speculator;
 
 public:
   using ImplPair = std::pair<SymbolStringPtr, JITDylib *>;
-  using ImapTy   = DenseMap<SymbolStringPtr, ImplPair>;
+  using ImapTy = DenseMap<SymbolStringPtr, ImplPair>;
 
   void trackImpls(SymbolAliasMap ImplMaps, JITDylib *SrcJD);
 
 private:
-  ImplPair getImplFor(const SymbolStringPtr& StubAddr) {
+  ImplPair getImplFor(const SymbolStringPtr &StubAddr) {
     std::lock_guard<std::mutex> Lockit(ConcurrentAccess);
     auto Position = Maps.find(StubAddr);
-    assert(Position != Maps.end() && "ImplSymbols are not tracked for this Symbol?");
+    assert(Position != Maps.end() &&
+           "ImplSymbols are not tracked for this Symbol?");
     return Position->getSecond();
   }
 
@@ -55,49 +56,52 @@ private:
 
 class Speculator {
 public:
-
-
-  using TargetFAddr    = JITTargetAddress;
+  using TargetFAddr = JITTargetAddress;
   using SpeculationMap = DenseMap<TargetFAddr, SymbolNameSet>;
 
-  explicit Speculator(Imap &Impl,ExecutionSession& ref) : AliaseeImplTable(Impl),ES(ref){}
+  explicit Speculator(Imap &Impl, ExecutionSession &ref)
+      : AliaseeImplTable(Impl), ES(ref),GlobalSpecMap(0) {}
+
+  Speculator(const Speculator&) = delete;
+
+  Speculator(Speculator&&) = delete;
 
   // Speculation Layer registers likely function through this method.
   void registerSymbolsWithAddr(TargetFAddr, SymbolNameSet);
-
-  // Non-runtime overload for registeration
-  void materializeOnLookup(SymbolNameSet,ExecutionSession&);
 
   // Speculatively compile likely functions for the given Stub Address.
   // destination of __orc_speculate_for jump
   void speculateFor(JITTargetAddress);
 
+  Imap &getImapRef() { return AliaseeImplTable; }
 
-  Imap& getImapRef(){
-    return AliaseeImplTable;
+  ~Speculator(){
+    llvm::errs() << "\n Premature Destruction of Speculator ";
   }
 
 private:
   void launchCompile(JITTargetAddress FAddr) {
     auto It = GlobalSpecMap.find(FAddr);
-    assert(It != GlobalSpecMap.end() && "launching speculative compiles for unexpected function address?");
-      for (auto &Calle : It->getSecond()){
-        auto ImplSymbol = AliaseeImplTable.getImplFor(Calle);
-        const auto& ImplSymbolName = ImplSymbol.first;
-        auto* ImplJD = ImplSymbol.second;
-        ES.lookup(JITDylibSearchList({{ImplJD, true}}), SymbolNameSet({ImplSymbolName}),
-          SymbolState::Ready,
-          [this](Expected<SymbolMap> Result) {
-            if (auto Err = Result.takeError())
-            ES.reportError(std::move(Err));
-          },NoDependenciesToRegister);
-      }
+    assert(It != GlobalSpecMap.end() &&
+           "launching speculative compiles for unexpected function address?");
+    for (auto &Calle : It->getSecond()) {
+      auto ImplSymbol = AliaseeImplTable.getImplFor(Calle);
+      const auto &ImplSymbolName = ImplSymbol.first;
+      auto *ImplJD = ImplSymbol.second;
+      ES.lookup(JITDylibSearchList({{ImplJD, true}}),
+                SymbolNameSet({ImplSymbolName}), SymbolState::Ready,
+                [this](Expected<SymbolMap> Result) {
+                  if (auto Err = Result.takeError())
+                    ES.reportError(std::move(Err));
+                },
+                NoDependenciesToRegister);
+    }
   }
 
   std::mutex ConcurrentAccess;
   Imap &AliaseeImplTable;
+  ExecutionSession &ES;
   SpeculationMap GlobalSpecMap;
-  ExecutionSession& ES;
 };
 
 // Walks the LLVM Module and collect likely functions for each LLVM Function if
@@ -123,7 +127,7 @@ public:
 
   Speculator &getSpeculator() const { return S; }
 
-  IRCompileLayer& getCompileLayer() const {return NextLayer; }
+  IRCompileLayer &getCompileLayer() const { return NextLayer; }
 
   static CalleSet Walk(const Function &);
 
