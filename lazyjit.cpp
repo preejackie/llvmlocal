@@ -3,7 +3,6 @@
 #include "llvm/ExecutionEngine/Orc/IRCompileLayer.h"
 #include "llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h"
 #include "llvm/ExecutionEngine/SectionMemoryManager.h"
-
 #include "llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h"
 #include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
 #include "llvm/ExecutionEngine/Orc/CompileOnDemandLayer.h"
@@ -27,9 +26,10 @@
 using namespace llvm;
 using namespace orc;
 
-void global_free(){
-llvm::errs() << "\n Global free";
+void SymbolNotFound(){
+llvm::errs() << "\n Symbol Not Found ";
 }
+
 class LazyJIT{
 private:
     //Order is important
@@ -38,11 +38,11 @@ private:
 
     orc::RTDyldObjectLinkingLayer linklayer;
     orc::IRCompileLayer compilelayer;
-   
+    
     orc::Imap imap;
-    orc::Speculator smap;
+    orc::Speculator Specls;
     orc::SpeculationLayer SL;
-   
+    
     orc::CompileOnDemandLayer LazyStubs;
 
     orc::ThreadSafeContext TSC;
@@ -57,12 +57,13 @@ private:
 public:
 LazyJIT(orc::JITTargetMachineBuilder MchBuilder,DataLayout DL,Triple triple)
 :
-    LCTM(cantFail(orc::createLocalLazyCallThroughManager(MchBuilder.getTargetTriple(),this->ES,reinterpret_cast<uint64_t>(global_free)))),
+    LCTM(cantFail(orc::createLocalLazyCallThroughManager(MchBuilder.getTargetTriple(),this->ES,
+        reinterpret_cast<uint64_t>(SymbolNotFound)))),
     linklayer(this->ES,[](){
     return llvm::make_unique<SectionMemoryManager>();}),
     compilelayer(this->ES,linklayer,ConcurrentIRCompiler(std::move(MchBuilder))),
-    smap(imap,this->ES),
-    SL(this->ES,compilelayer,smap),
+    Specls(imap,this->ES),
+    SL(this->ES,compilelayer,Specls),
     LazyStubs(this->ES,SL,*LCTM,std::move(orc::createLocalIndirectStubsManagerBuilder(std::move(triple)))),
     
     TSC(llvm::make_unique<LLVMContext>()),
@@ -76,9 +77,7 @@ LazyJIT(orc::JITTargetMachineBuilder MchBuilder,DataLayout DL,Triple triple)
 
     LazyStubs.setImap(&imap);
    
- 
     this->CompileThreads = llvm::make_unique<ThreadPool>(4);
-
     ES.setDispatchMaterialization(
         [this](JITDylib &JD, std::unique_ptr<MaterializationUnit> MU) {
           auto SharedMU = std::shared_ptr<MaterializationUnit>(std::move(MU));
@@ -86,6 +85,22 @@ LazyJIT(orc::JITTargetMachineBuilder MchBuilder,DataLayout DL,Triple triple)
           CompileThreads->async(std::move(Work));   
         });
     
+    auto orc_internal_symbol = ES.intern("orc_speculator"); 
+    llvm::errs() << "\n JIT Target Addr before absoluteSymbols " << JITTargetAddress(&Specls);
+
+
+    JITEvaluatedSymbol Js(JITTargetAddress(&Specls),JITSymbolFlags::Exported);
+    SymbolMap SM;
+    SM[orc_internal_symbol] = Js;
+
+    for(auto& o:SM){
+        llvm::errs() <<"\n JIT Target in SymbolMap " << o.getSecond().getAddress();
+    }
+
+    if( auto Err = ES.getMainJITDylib().define(absoluteSymbols(SM))){
+        llvm::errs() <<"\n Error while adding abs Symbol";
+    }
+
 }
 
 public:
@@ -103,7 +118,6 @@ public:
     }
 
     Error addModule(ThreadSafeModule M){
-
         return LazyStubs.add(ES.getMainJITDylib(),std::move(M));
     }
     void loadCurrentProcessSymbols(StringRef JName){
@@ -154,6 +168,7 @@ int main()
     auto G = (**JITEngine).addModule(ThreadSafeModule(std::move(M1), std::move(Ctx1)));
     if(G){}
 
+    
     ThreadSafeContext Ctx2(llvm::make_unique<LLVMContext>());
     auto M2 = parseIRFile("appfns.ll",error2,*Ctx2.getContext());
     auto h1 = (**JITEngine).addModule(ThreadSafeModule(std::move(M2), std::move(Ctx2)));
@@ -163,26 +178,16 @@ int main()
     auto M3 = parseIRFile("appdata.ll",error3,*Ctx3.getContext());
     auto h = (**JITEngine).addModule(ThreadSafeModule(std::move(M3), std::move(Ctx3)));
     if(h){}
-
+    
 
     auto R = (**JITEngine).lookup("main");
     if(!R){
         llvm::errs() << "\n Error";
     }
     
-
-
     using Type = int ();
      
    llvm::errs() << "Ans is : "<< ((Type*) (*R).getAddress())();
     
-   llvm::errs() << "\n After WorkSet";
-   
-
-   
-   llvm::errs() << "\n Before JIT destruction ";
-    return 0;
+   return 0;
 }
-
-
-
