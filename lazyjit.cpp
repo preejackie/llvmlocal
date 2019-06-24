@@ -156,7 +156,7 @@ int main()
     InitializeNativeTarget();
     InitializeNativeTargetAsmPrinter();
 
-    SMDiagnostic error1,error2,error3;
+    SMDiagnostic error1;
 
     auto JITEngine = LazyJIT::CreateJITEngine();
     if(!JITEngine)
@@ -166,19 +166,9 @@ int main()
     ThreadSafeContext Ctx1(llvm::make_unique<LLVMContext>());
     auto M1 = parseIRFile("myapp.ll", error1,*Ctx1.getContext());
     auto G = (**JITEngine).addModule(ThreadSafeModule(std::move(M1), std::move(Ctx1)));
-    if(G){}
-
-    
-    ThreadSafeContext Ctx2(llvm::make_unique<LLVMContext>());
-    auto M2 = parseIRFile("appfns.ll",error2,*Ctx2.getContext());
-    auto h1 = (**JITEngine).addModule(ThreadSafeModule(std::move(M2), std::move(Ctx2)));
-    if(h1){}
-    
-    ThreadSafeContext Ctx3(llvm::make_unique<LLVMContext>());
-    auto M3 = parseIRFile("appdata.ll",error3,*Ctx3.getContext());
-    auto h = (**JITEngine).addModule(ThreadSafeModule(std::move(M3), std::move(Ctx3)));
-    if(h){}
-    
+    if(G){
+        llvm::errs() << "\n Error Adding Modules ";
+    }
 
     auto R = (**JITEngine).lookup("main");
     if(!R){
