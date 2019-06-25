@@ -21,6 +21,7 @@ namespace orc {
 extern "C" void __orc_speculate_for(void* Ptr, uint64_t StubId) {
   // trigger compilation
 assert(Ptr && "Null Address Received in orc_speculate_for ");
+reinterpret_cast<Speculator*>(Ptr)->speculateFor(StubId);
 }
 } // namespace orc
 } // namespace llvm
