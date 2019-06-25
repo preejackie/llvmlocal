@@ -13,6 +13,7 @@
 #include "llvm/ExecutionEngine/Orc/Speculation.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/ThreadPool.h"
@@ -26,8 +27,10 @@
 using namespace llvm;
 using namespace orc;
 
+ExitOnError ExitOnErr;
+
 void SymbolNotFound(){
-llvm::errs() << "\n Symbol Not Found ";
+llvm::errs() << "\n Symbol Not Found ??? ";
 }
 
 class LazyJIT{
@@ -42,7 +45,7 @@ private:
     orc::Imap imap;
     orc::Speculator Specls;
     orc::SpeculationLayer SL;
-    
+    orc::Speculator* WierdPointer;
     orc::CompileOnDemandLayer LazyStubs;
 
     orc::ThreadSafeContext TSC;
@@ -69,11 +72,11 @@ LazyJIT(orc::JITTargetMachineBuilder MchBuilder,DataLayout DL,Triple triple)
     TSC(llvm::make_unique<LLVMContext>()),
     CompileThreads (nullptr),
     DL(std::move(DL)),
-    Mangle(ES,DL)
+    Mangle(ES,this->DL)
 {
 
     ES.getMainJITDylib().setGenerator(
-    cantFail(DynamicLibrarySearchGenerator::GetForCurrentProcess(DL.getGlobalPrefix())));
+    cantFail(DynamicLibrarySearchGenerator::GetForCurrentProcess(this->DL.getGlobalPrefix())));
 
     LazyStubs.setImap(&imap);
    
@@ -85,11 +88,11 @@ LazyJIT(orc::JITTargetMachineBuilder MchBuilder,DataLayout DL,Triple triple)
           CompileThreads->async(std::move(Work));   
         });
     
-    auto orc_internal_symbol = ES.intern("orc_speculator"); 
+    auto orc_internal_symbol = Mangle("orc_speculator");
     llvm::errs() << "\n JIT Target Addr before absoluteSymbols " << JITTargetAddress(&Specls);
 
-
-    JITEvaluatedSymbol Js(JITTargetAddress(&Specls),JITSymbolFlags::Exported);
+    WierdPointer = &Specls;
+    JITEvaluatedSymbol Js(JITTargetAddress(&WierdPointer),JITSymbolFlags::Exported);
     SymbolMap SM;
     SM[orc_internal_symbol] = Js;
 
@@ -118,14 +121,15 @@ public:
     }
 
     Error addModule(ThreadSafeModule M){
+      M.getModule()->setDataLayout(DL);
         return LazyStubs.add(ES.getMainJITDylib(),std::move(M));
     }
-    void loadCurrentProcessSymbols(StringRef JName){
-       ES.getJITDylibByName(JName)->setGenerator(cantFail(DynamicLibrarySearchGenerator::GetForCurrentProcess(DL.getGlobalPrefix())));
+    void loadCurrentProcessSymbols(){
+      ES.getMainJITDylib().setGenerator(cantFail(DynamicLibrarySearchGenerator::GetForCurrentProcess(DL.getGlobalPrefix())));
     }
 
     Expected<JITEvaluatedSymbol> lookup(StringRef Name){
-        return ES.lookup({&ES.getMainJITDylib()},Name);
+        return ES.lookup({&ES.getMainJITDylib()},Mangle(Name));
     }
     void dumpState(){
         ES.dump(llvm::errs());
@@ -145,39 +149,35 @@ public:
      if (CompileThreads)
       CompileThreads->wait();
         
-        this->dumpState();
+     //this->dumpState();
        
     }
 };
 
-int main()
+int main(int argc, char *argv[])
 {
+    ExitOnErr.setBanner(std::string(argv[0]) + ":");
 
     InitializeNativeTarget();
     InitializeNativeTargetAsmPrinter();
 
     SMDiagnostic error1;
 
-    auto JITEngine = LazyJIT::CreateJITEngine();
-    if(!JITEngine)
-        JITEngine.takeError();
+    auto JITEngine = ExitOnErr(LazyJIT::CreateJITEngine());
+    JITEngine->loadCurrentProcessSymbols();
 
-    
     ThreadSafeContext Ctx1(llvm::make_unique<LLVMContext>());
     auto M1 = parseIRFile("myapp.ll", error1,*Ctx1.getContext());
-    auto G = (**JITEngine).addModule(ThreadSafeModule(std::move(M1), std::move(Ctx1)));
-    if(G){
-        llvm::errs() << "\n Error Adding Modules ";
-    }
+    ExitOnErr(JITEngine->addModule(ThreadSafeModule(std::move(M1), std::move(Ctx1))));
 
-    auto R = (**JITEngine).lookup("main");
-    if(!R){
-        llvm::errs() << "\n Error";
-    }
+    auto R = ExitOnErr(JITEngine->lookup("main"));
     
     using Type = int ();
      
-   llvm::errs() << "Ans is : "<< ((Type*) (*R).getAddress())();
+    llvm::errs() << "\nAns is : "<< ((Type*)R.getAddress())();
     
    return 0;
 }
+
+//export PATH=/home/preejackie/llvminstallers/orcs/bin:$PATH
+//export LD_LIBRARY_PATH=/home/preejackie/llvminstallers/orcs/lib:$LD_LIBRARY_PATH
