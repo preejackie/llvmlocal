@@ -20,6 +20,7 @@
 #include "llvm/ExecutionEngine/Orc/IndirectionUtils.h"
 #include "llvm/ExecutionEngine/Orc/Speculation.h"
 
+#include "llvm/Support/FileOutputBuffer.h"
 namespace llvm {
 
 class Triple;

@@ -10,6 +10,7 @@
 
 #include "llvm/ADT/Triple.h"
 #include "llvm/ExecutionEngine/Orc/OrcABISupport.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <chrono>
 #define DEBUG_TYPE "orc"
