@@ -55,6 +55,9 @@ private:
   // Implement DiagnosticsConsumer.
   void onDiagnosticsReady(PathRef File, std::vector<Diag> Diagnostics) override;
   void onFileUpdated(PathRef File, const TUStatus &Status) override;
+  void
+  onHighlightingsReady(PathRef File,
+                       std::vector<HighlightingToken> Highlightings) override;
 
   // LSP methods. Notifications have signature void(const Params&).
   // Calls have signature void(const Params&, Callback<Response>).
@@ -92,11 +95,15 @@ private:
   void onCommand(const ExecuteCommandParams &, Callback<llvm::json::Value>);
   void onWorkspaceSymbol(const WorkspaceSymbolParams &,
                          Callback<std::vector<SymbolInformation>>);
+  void onPrepareRename(const TextDocumentPositionParams &,
+                       Callback<llvm::Optional<Range>>);
   void onRename(const RenameParams &, Callback<WorkspaceEdit>);
   void onHover(const TextDocumentPositionParams &,
                Callback<llvm::Optional<Hover>>);
   void onTypeHierarchy(const TypeHierarchyParams &,
                        Callback<llvm::Optional<TypeHierarchyItem>>);
+  void onResolveTypeHierarchy(const ResolveTypeHierarchyItemParams &,
+                              Callback<llvm::Optional<TypeHierarchyItem>>);
   void onChangeConfiguration(const DidChangeConfigurationParams &);
   void onSymbolInfo(const TextDocumentPositionParams &,
                     Callback<std::vector<SymbolDetails>>);
@@ -114,6 +121,9 @@ private:
   /// compilation database is changed.
   void reparseOpenedFiles();
   void applyConfiguration(const ConfigurationSettings &Settings);
+
+  /// Sends a "publishSemanticHighlighting" notification to the LSP client.
+  void publishSemanticHighlighting(SemanticHighlightingParams Params);
 
   /// Sends a "publishDiagnostics" notification to the LSP client.
   void publishDiagnostics(const URIForFile &File,

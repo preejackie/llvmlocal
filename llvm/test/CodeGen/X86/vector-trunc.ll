@@ -1052,7 +1052,7 @@ entry:
 define void @trunc16i16_16i8(<16 x i16> %a) {
 ; SSE2-LABEL: trunc16i16_16i8:
 ; SSE2:       # %bb.0: # %entry
-; SSE2-NEXT:    movdqa {{.*#+}} xmm2 = [255,255,255,255,255,255,255,255]
+; SSE2-NEXT:    movdqa {{.*#+}} xmm2 = [255,0,255,0,255,0,255,0,255,0,255,0,255,0,255,0]
 ; SSE2-NEXT:    pand %xmm2, %xmm1
 ; SSE2-NEXT:    pand %xmm2, %xmm0
 ; SSE2-NEXT:    packuswb %xmm1, %xmm0
@@ -1158,7 +1158,7 @@ define void @trunc16i16_16i8_ashr(<16 x i16> %a) {
 ;
 ; AVX512F-LABEL: trunc16i16_16i8_ashr:
 ; AVX512F:       # %bb.0: # %entry
-; AVX512F-NEXT:    vpsraw $8, %ymm0, %ymm0
+; AVX512F-NEXT:    vpsrlw $8, %ymm0, %ymm0
 ; AVX512F-NEXT:    vpmovzxwd {{.*#+}} zmm0 = ymm0[0],zero,ymm0[1],zero,ymm0[2],zero,ymm0[3],zero,ymm0[4],zero,ymm0[5],zero,ymm0[6],zero,ymm0[7],zero,ymm0[8],zero,ymm0[9],zero,ymm0[10],zero,ymm0[11],zero,ymm0[12],zero,ymm0[13],zero,ymm0[14],zero,ymm0[15],zero
 ; AVX512F-NEXT:    vpmovdb %zmm0, (%rax)
 ; AVX512F-NEXT:    vzeroupper
@@ -1166,7 +1166,7 @@ define void @trunc16i16_16i8_ashr(<16 x i16> %a) {
 ;
 ; AVX512VL-LABEL: trunc16i16_16i8_ashr:
 ; AVX512VL:       # %bb.0: # %entry
-; AVX512VL-NEXT:    vpsraw $8, %ymm0, %ymm0
+; AVX512VL-NEXT:    vpsrlw $8, %ymm0, %ymm0
 ; AVX512VL-NEXT:    vpmovzxwd {{.*#+}} zmm0 = ymm0[0],zero,ymm0[1],zero,ymm0[2],zero,ymm0[3],zero,ymm0[4],zero,ymm0[5],zero,ymm0[6],zero,ymm0[7],zero,ymm0[8],zero,ymm0[9],zero,ymm0[10],zero,ymm0[11],zero,ymm0[12],zero,ymm0[13],zero,ymm0[14],zero,ymm0[15],zero
 ; AVX512VL-NEXT:    vpmovdb %zmm0, (%rax)
 ; AVX512VL-NEXT:    vzeroupper
@@ -1261,7 +1261,7 @@ entry:
 define void @trunc32i16_32i8(<32 x i16> %a) {
 ; SSE2-LABEL: trunc32i16_32i8:
 ; SSE2:       # %bb.0: # %entry
-; SSE2-NEXT:    movdqa {{.*#+}} xmm4 = [255,255,255,255,255,255,255,255]
+; SSE2-NEXT:    movdqa {{.*#+}} xmm4 = [255,0,255,0,255,0,255,0,255,0,255,0,255,0,255,0]
 ; SSE2-NEXT:    pand %xmm4, %xmm1
 ; SSE2-NEXT:    pand %xmm4, %xmm0
 ; SSE2-NEXT:    packuswb %xmm1, %xmm0
@@ -1728,7 +1728,7 @@ entry:
 define <16 x i8> @trunc2x8i16_16i8(<8 x i16> %a, <8 x i16> %b) {
 ; SSE2-LABEL: trunc2x8i16_16i8:
 ; SSE2:       # %bb.0: # %entry
-; SSE2-NEXT:    movdqa {{.*#+}} xmm2 = [255,255,255,255,255,255,255,255]
+; SSE2-NEXT:    movdqa {{.*#+}} xmm2 = [255,0,255,0,255,0,255,0,255,0,255,0,255,0,255,0]
 ; SSE2-NEXT:    pand %xmm2, %xmm1
 ; SSE2-NEXT:    pand %xmm2, %xmm0
 ; SSE2-NEXT:    packuswb %xmm1, %xmm0

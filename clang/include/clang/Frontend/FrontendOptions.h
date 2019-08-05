@@ -88,6 +88,10 @@ enum ActionKind {
   /// Generate pre-compiled header.
   GeneratePCH,
 
+  /// Generate Interface Stub Files.
+  GenerateInterfaceYAMLExpV1,
+  GenerateInterfaceTBEExpV1,
+
   /// Only execute frontend initialization.
   InitOnly,
 
@@ -447,6 +451,9 @@ public:
   /// Filename to write statistics to.
   std::string StatsFile;
 
+  /// Minimum time granularity (in microseconds) traced by time profiler.
+  unsigned TimeTraceGranularity;
+
 public:
   FrontendOptions()
       : DisableFree(false), RelocatablePCH(false), ShowHelp(false),
@@ -457,7 +464,7 @@ public:
         UseGlobalModuleIndex(true), GenerateGlobalModuleIndex(true),
         ASTDumpDecls(false), ASTDumpLookups(false),
         BuildingImplicitModule(false), ModulesEmbedAllFiles(false),
-        IncludeTimestamps(true) {}
+        IncludeTimestamps(true), TimeTraceGranularity(500) {}
 
   /// getInputKindForExtension - Return the appropriate input kind for a file
   /// extension. For example, "c" would return InputKind::C.

@@ -463,7 +463,7 @@ RegInterval WaitcntBrackets::getRegInterval(const MachineInstr *MI,
                                             unsigned OpNo, bool Def) const {
   const MachineOperand &Op = MI->getOperand(OpNo);
   if (!Op.isReg() || !TRI->isInAllocatableClass(Op.getReg()) ||
-      (Def && !Op.isDef()))
+      (Def && !Op.isDef()) || TRI->isAGPR(*MRI, Op.getReg()))
     return {-1, -1};
 
   // A use via a PW operand does not need a waitcnt.
@@ -536,15 +536,14 @@ void WaitcntBrackets::updateByEvent(const SIInstrInfo *TII,
     // Put score on the source vgprs. If this is a store, just use those
     // specific register(s).
     if (TII->isDS(Inst) && (Inst.mayStore() || Inst.mayLoad())) {
+      int AddrOpIdx =
+          AMDGPU::getNamedOperandIdx(Inst.getOpcode(), AMDGPU::OpName::addr);
       // All GDS operations must protect their address register (same as
       // export.)
-      if (Inst.getOpcode() != AMDGPU::DS_APPEND &&
-          Inst.getOpcode() != AMDGPU::DS_CONSUME) {
-        setExpScore(
-            &Inst, TII, TRI, MRI,
-            AMDGPU::getNamedOperandIdx(Inst.getOpcode(), AMDGPU::OpName::addr),
-            CurrScore);
+      if (AddrOpIdx != -1) {
+        setExpScore(&Inst, TII, TRI, MRI, AddrOpIdx, CurrScore);
       }
+
       if (Inst.mayStore()) {
         if (AMDGPU::getNamedOperandIdx(Inst.getOpcode(),
                                        AMDGPU::OpName::data0) != -1) {
@@ -1038,7 +1037,7 @@ bool SIInsertWaitcnts::generateWaitcntInstBefore(
   // TODO: Remove this work-around, enable the assert for Bug 457939
   //       after fixing the scheduler. Also, the Shader Compiler code is
   //       independent of target.
-  if (readsVCCZ(MI) && ST->getGeneration() <= AMDGPUSubtarget::SEA_ISLANDS) {
+  if (readsVCCZ(MI) && ST->hasReadVCCZBug()) {
     if (ScoreBrackets.getScoreLB(LGKM_CNT) <
             ScoreBrackets.getScoreUB(LGKM_CNT) &&
         ScoreBrackets.hasPendingEvent(SMEM_ACCESS)) {
@@ -1358,7 +1357,8 @@ bool SIInsertWaitcnts::insertWaitcntInBlock(MachineFunction &MF,
   // Walk over the instructions.
   MachineInstr *OldWaitcntInstr = nullptr;
 
-  for (MachineBasicBlock::iterator Iter = Block.begin(), E = Block.end();
+  for (MachineBasicBlock::instr_iterator Iter = Block.instr_begin(),
+                                         E = Block.instr_end();
        Iter != E;) {
     MachineInstr &Inst = *Iter;
 
@@ -1407,18 +1407,6 @@ bool SIInsertWaitcnts::insertWaitcntInBlock(MachineFunction &MF,
       ScoreBrackets.dump();
     });
 
-    // Check to see if this is a GWS instruction. If so, and if this is CI or
-    // VI, then the generated code sequence will include an S_WAITCNT 0.
-    // TODO: Are these the only GWS instructions?
-    if (Inst.getOpcode() == AMDGPU::DS_GWS_INIT ||
-        Inst.getOpcode() == AMDGPU::DS_GWS_SEMA_V ||
-        Inst.getOpcode() == AMDGPU::DS_GWS_SEMA_BR ||
-        Inst.getOpcode() == AMDGPU::DS_GWS_SEMA_P ||
-        Inst.getOpcode() == AMDGPU::DS_GWS_BARRIER) {
-      // TODO: && context->target_info->GwsRequiresMemViolTest() ) {
-      ScoreBrackets.applyWaitcnt(AMDGPU::Waitcnt::allZeroExceptVsCnt());
-    }
-
     // TODO: Remove this work-around after fixing the scheduler and enable the
     // assert above.
     if (VCCZBugWorkAround) {
@@ -1426,9 +1414,9 @@ bool SIInsertWaitcnts::insertWaitcntInBlock(MachineFunction &MF,
       // bit is updated, so we can restore the bit by reading the value of
       // vcc and then writing it back to the register.
       BuildMI(Block, Inst, Inst.getDebugLoc(),
-              TII->get(AMDGPU::S_MOV_B64),
-              AMDGPU::VCC)
-          .addReg(AMDGPU::VCC);
+              TII->get(ST->isWave32() ? AMDGPU::S_MOV_B32 : AMDGPU::S_MOV_B64),
+              TRI->getVCC())
+          .addReg(TRI->getVCC());
       VCCZBugHandledSet.insert(&Inst);
       Modified = true;
     }

@@ -17,6 +17,7 @@
 #include "RISCVRegisterInfo.h"
 #include "RISCVSubtarget.h"
 #include "RISCVTargetMachine.h"
+#include "Utils/RISCVMatInt.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/CodeGen/CallingConvLower.h"
@@ -176,6 +177,13 @@ RISCVTargetLowering::RISCVTargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::GlobalAddress, XLenVT, Custom);
   setOperationAction(ISD::BlockAddress, XLenVT, Custom);
   setOperationAction(ISD::ConstantPool, XLenVT, Custom);
+
+  setOperationAction(ISD::GlobalTLSAddress, XLenVT, Custom);
+
+  // TODO: On M-mode only targets, the cycle[h] CSR may not be present.
+  // Unfortunately this can't be determined just from the ISA naming string.
+  setOperationAction(ISD::READCYCLECOUNTER, MVT::i64,
+                     Subtarget.is64Bit() ? Legal : Custom);
 
   if (Subtarget.hasStdExtA()) {
     setMaxAtomicSizeInBitsSupported(Subtarget.getXLen());
@@ -357,6 +365,8 @@ SDValue RISCVTargetLowering::LowerOperation(SDValue Op,
     return lowerBlockAddress(Op, DAG);
   case ISD::ConstantPool:
     return lowerConstantPool(Op, DAG);
+  case ISD::GlobalTLSAddress:
+    return lowerGlobalTLSAddress(Op, DAG);
   case ISD::SELECT:
     return lowerSELECT(Op, DAG);
   case ISD::VASTART:
@@ -477,6 +487,116 @@ SDValue RISCVTargetLowering::lowerConstantPool(SDValue Op,
   ConstantPoolSDNode *N = cast<ConstantPoolSDNode>(Op);
 
   return getAddr(N, DAG);
+}
+
+SDValue RISCVTargetLowering::getStaticTLSAddr(GlobalAddressSDNode *N,
+                                              SelectionDAG &DAG,
+                                              bool UseGOT) const {
+  SDLoc DL(N);
+  EVT Ty = getPointerTy(DAG.getDataLayout());
+  const GlobalValue *GV = N->getGlobal();
+  MVT XLenVT = Subtarget.getXLenVT();
+
+  if (UseGOT) {
+    // Use PC-relative addressing to access the GOT for this TLS symbol, then
+    // load the address from the GOT and add the thread pointer. This generates
+    // the pattern (PseudoLA_TLS_IE sym), which expands to
+    // (ld (auipc %tls_ie_pcrel_hi(sym)) %pcrel_lo(auipc)).
+    SDValue Addr = DAG.getTargetGlobalAddress(GV, DL, Ty, 0, 0);
+    SDValue Load =
+        SDValue(DAG.getMachineNode(RISCV::PseudoLA_TLS_IE, DL, Ty, Addr), 0);
+
+    // Add the thread pointer.
+    SDValue TPReg = DAG.getRegister(RISCV::X4, XLenVT);
+    return DAG.getNode(ISD::ADD, DL, Ty, Load, TPReg);
+  }
+
+  // Generate a sequence for accessing the address relative to the thread
+  // pointer, with the appropriate adjustment for the thread pointer offset.
+  // This generates the pattern
+  // (add (add_tprel (lui %tprel_hi(sym)) tp %tprel_add(sym)) %tprel_lo(sym))
+  SDValue AddrHi =
+      DAG.getTargetGlobalAddress(GV, DL, Ty, 0, RISCVII::MO_TPREL_HI);
+  SDValue AddrAdd =
+      DAG.getTargetGlobalAddress(GV, DL, Ty, 0, RISCVII::MO_TPREL_ADD);
+  SDValue AddrLo =
+      DAG.getTargetGlobalAddress(GV, DL, Ty, 0, RISCVII::MO_TPREL_LO);
+
+  SDValue MNHi = SDValue(DAG.getMachineNode(RISCV::LUI, DL, Ty, AddrHi), 0);
+  SDValue TPReg = DAG.getRegister(RISCV::X4, XLenVT);
+  SDValue MNAdd = SDValue(
+      DAG.getMachineNode(RISCV::PseudoAddTPRel, DL, Ty, MNHi, TPReg, AddrAdd),
+      0);
+  return SDValue(DAG.getMachineNode(RISCV::ADDI, DL, Ty, MNAdd, AddrLo), 0);
+}
+
+SDValue RISCVTargetLowering::getDynamicTLSAddr(GlobalAddressSDNode *N,
+                                               SelectionDAG &DAG) const {
+  SDLoc DL(N);
+  EVT Ty = getPointerTy(DAG.getDataLayout());
+  IntegerType *CallTy = Type::getIntNTy(*DAG.getContext(), Ty.getSizeInBits());
+  const GlobalValue *GV = N->getGlobal();
+
+  // Use a PC-relative addressing mode to access the global dynamic GOT address.
+  // This generates the pattern (PseudoLA_TLS_GD sym), which expands to
+  // (addi (auipc %tls_gd_pcrel_hi(sym)) %pcrel_lo(auipc)).
+  SDValue Addr = DAG.getTargetGlobalAddress(GV, DL, Ty, 0, 0);
+  SDValue Load =
+      SDValue(DAG.getMachineNode(RISCV::PseudoLA_TLS_GD, DL, Ty, Addr), 0);
+
+  // Prepare argument list to generate call.
+  ArgListTy Args;
+  ArgListEntry Entry;
+  Entry.Node = Load;
+  Entry.Ty = CallTy;
+  Args.push_back(Entry);
+
+  // Setup call to __tls_get_addr.
+  TargetLowering::CallLoweringInfo CLI(DAG);
+  CLI.setDebugLoc(DL)
+      .setChain(DAG.getEntryNode())
+      .setLibCallee(CallingConv::C, CallTy,
+                    DAG.getExternalSymbol("__tls_get_addr", Ty),
+                    std::move(Args));
+
+  return LowerCallTo(CLI).first;
+}
+
+SDValue RISCVTargetLowering::lowerGlobalTLSAddress(SDValue Op,
+                                                   SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT Ty = Op.getValueType();
+  GlobalAddressSDNode *N = cast<GlobalAddressSDNode>(Op);
+  int64_t Offset = N->getOffset();
+  MVT XLenVT = Subtarget.getXLenVT();
+
+  // Non-PIC TLS lowering should always use the LocalExec model.
+  TLSModel::Model Model = isPositionIndependent()
+                              ? getTargetMachine().getTLSModel(N->getGlobal())
+                              : TLSModel::LocalExec;
+
+  SDValue Addr;
+  switch (Model) {
+  case TLSModel::LocalExec:
+    Addr = getStaticTLSAddr(N, DAG, /*UseGOT=*/false);
+    break;
+  case TLSModel::InitialExec:
+    Addr = getStaticTLSAddr(N, DAG, /*UseGOT=*/true);
+    break;
+  case TLSModel::LocalDynamic:
+  case TLSModel::GeneralDynamic:
+    Addr = getDynamicTLSAddr(N, DAG);
+    break;
+  }
+
+  // In order to maximise the opportunity for common subexpression elimination,
+  // emit a separate ADD node for the global address offset instead of folding
+  // it in the global address node. Later peephole optimisations may choose to
+  // fold it back in when profitable.
+  if (Offset != 0)
+    return DAG.getNode(ISD::ADD, DL, Ty, Addr,
+                       DAG.getConstant(Offset, DL, XLenVT));
+  return Addr;
 }
 
 SDValue RISCVTargetLowering::lowerSELECT(SDValue Op, SelectionDAG &DAG) const {
@@ -721,6 +841,19 @@ void RISCVTargetLowering::ReplaceNodeResults(SDNode *N,
   switch (N->getOpcode()) {
   default:
     llvm_unreachable("Don't know how to custom type legalize this operation!");
+  case ISD::READCYCLECOUNTER: {
+    assert(!Subtarget.is64Bit() &&
+           "READCYCLECOUNTER only has custom type legalization on riscv32");
+
+    SDVTList VTs = DAG.getVTList(MVT::i32, MVT::i32, MVT::Other);
+    SDValue RCW =
+        DAG.getNode(RISCVISD::READ_CYCLE_WIDE, DL, VTs, N->getOperand(0));
+
+    Results.push_back(RCW);
+    Results.push_back(RCW.getValue(1));
+    Results.push_back(RCW.getValue(2));
+    break;
+  }
   case ISD::SHL:
   case ISD::SRA:
   case ISD::SRL:
@@ -854,6 +987,50 @@ SDValue RISCVTargetLowering::PerformDAGCombine(SDNode *N,
   return SDValue();
 }
 
+bool RISCVTargetLowering::isDesirableToCommuteWithShift(
+    const SDNode *N, CombineLevel Level) const {
+  // The following folds are only desirable if `(OP _, c1 << c2)` can be
+  // materialised in fewer instructions than `(OP _, c1)`:
+  //
+  //   (shl (add x, c1), c2) -> (add (shl x, c2), c1 << c2)
+  //   (shl (or x, c1), c2) -> (or (shl x, c2), c1 << c2)
+  SDValue N0 = N->getOperand(0);
+  EVT Ty = N0.getValueType();
+  if (Ty.isScalarInteger() &&
+      (N0.getOpcode() == ISD::ADD || N0.getOpcode() == ISD::OR)) {
+    auto *C1 = dyn_cast<ConstantSDNode>(N0->getOperand(1));
+    auto *C2 = dyn_cast<ConstantSDNode>(N->getOperand(1));
+    if (C1 && C2) {
+      APInt C1Int = C1->getAPIntValue();
+      APInt ShiftedC1Int = C1Int << C2->getAPIntValue();
+
+      // We can materialise `c1 << c2` into an add immediate, so it's "free",
+      // and the combine should happen, to potentially allow further combines
+      // later.
+      if (isLegalAddImmediate(ShiftedC1Int.getSExtValue()))
+        return true;
+
+      // We can materialise `c1` in an add immediate, so it's "free", and the
+      // combine should be prevented.
+      if (isLegalAddImmediate(C1Int.getSExtValue()))
+        return false;
+
+      // Neither constant will fit into an immediate, so find materialisation
+      // costs.
+      int C1Cost = RISCVMatInt::getIntMatCost(C1Int, Ty.getSizeInBits(),
+                                              Subtarget.is64Bit());
+      int ShiftedC1Cost = RISCVMatInt::getIntMatCost(
+          ShiftedC1Int, Ty.getSizeInBits(), Subtarget.is64Bit());
+
+      // Materialising `c1` is cheaper than materialising `c1 << c2`, so the
+      // combine should be prevented.
+      if (C1Cost < ShiftedC1Cost)
+        return false;
+    }
+  }
+  return true;
+}
+
 unsigned RISCVTargetLowering::ComputeNumSignBitsForTargetNode(
     SDValue Op, const APInt &DemandedElts, const SelectionDAG &DAG,
     unsigned Depth) const {
@@ -873,6 +1050,68 @@ unsigned RISCVTargetLowering::ComputeNumSignBitsForTargetNode(
   }
 
   return 1;
+}
+
+MachineBasicBlock *emitReadCycleWidePseudo(MachineInstr &MI,
+                                           MachineBasicBlock *BB) {
+  assert(MI.getOpcode() == RISCV::ReadCycleWide && "Unexpected instruction");
+
+  // To read the 64-bit cycle CSR on a 32-bit target, we read the two halves.
+  // Should the count have wrapped while it was being read, we need to try
+  // again.
+  // ...
+  // read:
+  // rdcycleh x3 # load high word of cycle
+  // rdcycle  x2 # load low word of cycle
+  // rdcycleh x4 # load high word of cycle
+  // bne x3, x4, read # check if high word reads match, otherwise try again
+  // ...
+
+  MachineFunction &MF = *BB->getParent();
+  const BasicBlock *LLVM_BB = BB->getBasicBlock();
+  MachineFunction::iterator It = ++BB->getIterator();
+
+  MachineBasicBlock *LoopMBB = MF.CreateMachineBasicBlock(LLVM_BB);
+  MF.insert(It, LoopMBB);
+
+  MachineBasicBlock *DoneMBB = MF.CreateMachineBasicBlock(LLVM_BB);
+  MF.insert(It, DoneMBB);
+
+  // Transfer the remainder of BB and its successor edges to DoneMBB.
+  DoneMBB->splice(DoneMBB->begin(), BB,
+                  std::next(MachineBasicBlock::iterator(MI)), BB->end());
+  DoneMBB->transferSuccessorsAndUpdatePHIs(BB);
+
+  BB->addSuccessor(LoopMBB);
+
+  MachineRegisterInfo &RegInfo = MF.getRegInfo();
+  unsigned ReadAgainReg = RegInfo.createVirtualRegister(&RISCV::GPRRegClass);
+  unsigned LoReg = MI.getOperand(0).getReg();
+  unsigned HiReg = MI.getOperand(1).getReg();
+  DebugLoc DL = MI.getDebugLoc();
+
+  const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
+  BuildMI(LoopMBB, DL, TII->get(RISCV::CSRRS), HiReg)
+      .addImm(RISCVSysReg::lookupSysRegByName("CYCLEH")->Encoding)
+      .addReg(RISCV::X0);
+  BuildMI(LoopMBB, DL, TII->get(RISCV::CSRRS), LoReg)
+      .addImm(RISCVSysReg::lookupSysRegByName("CYCLE")->Encoding)
+      .addReg(RISCV::X0);
+  BuildMI(LoopMBB, DL, TII->get(RISCV::CSRRS), ReadAgainReg)
+      .addImm(RISCVSysReg::lookupSysRegByName("CYCLEH")->Encoding)
+      .addReg(RISCV::X0);
+
+  BuildMI(LoopMBB, DL, TII->get(RISCV::BNE))
+      .addReg(HiReg)
+      .addReg(ReadAgainReg)
+      .addMBB(LoopMBB);
+
+  LoopMBB->addSuccessor(LoopMBB);
+  LoopMBB->addSuccessor(DoneMBB);
+
+  MI.eraseFromParent();
+
+  return DoneMBB;
 }
 
 static MachineBasicBlock *emitSplitF64Pseudo(MachineInstr &MI,
@@ -1069,6 +1308,7 @@ static MachineBasicBlock *emitSelectPseudo(MachineInstr &MI,
     SelectMBBI = Next;
   }
 
+  F->getProperties().reset(MachineFunctionProperties::Property::NoPHIs);
   return TailMBB;
 }
 
@@ -1078,6 +1318,10 @@ RISCVTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
   switch (MI.getOpcode()) {
   default:
     llvm_unreachable("Unexpected instr type to insert");
+  case RISCV::ReadCycleWide:
+    assert(!Subtarget.is64Bit() &&
+           "ReadCycleWrite is only to be used on riscv32");
+    return emitReadCycleWidePseudo(MI, BB);
   case RISCV::Select_GPR_Using_CC_GPR:
   case RISCV::Select_FPR32_Using_CC_GPR:
   case RISCV::Select_FPR64_Using_CC_GPR:
@@ -1921,11 +2165,21 @@ SDValue RISCVTargetLowering::LowerCall(CallLoweringInfo &CLI,
   // TargetGlobalAddress/TargetExternalSymbol node so that legalize won't
   // split it and then direct call can be matched by PseudoCALL.
   if (GlobalAddressSDNode *S = dyn_cast<GlobalAddressSDNode>(Callee)) {
-    Callee = DAG.getTargetGlobalAddress(S->getGlobal(), DL, PtrVT, 0,
-                                        RISCVII::MO_CALL);
+    const GlobalValue *GV = S->getGlobal();
+
+    unsigned OpFlags = RISCVII::MO_CALL;
+    if (!getTargetMachine().shouldAssumeDSOLocal(*GV->getParent(), GV))
+      OpFlags = RISCVII::MO_PLT;
+
+    Callee = DAG.getTargetGlobalAddress(GV, DL, PtrVT, 0, OpFlags);
   } else if (ExternalSymbolSDNode *S = dyn_cast<ExternalSymbolSDNode>(Callee)) {
-    Callee =
-        DAG.getTargetExternalSymbol(S->getSymbol(), PtrVT, RISCVII::MO_CALL);
+    unsigned OpFlags = RISCVII::MO_CALL;
+
+    if (!getTargetMachine().shouldAssumeDSOLocal(*MF.getFunction().getParent(),
+                                                 nullptr))
+      OpFlags = RISCVII::MO_PLT;
+
+    Callee = DAG.getTargetExternalSymbol(S->getSymbol(), PtrVT, OpFlags);
   }
 
   // The first call operand is the chain and the second is the target address.
@@ -2137,8 +2391,25 @@ const char *RISCVTargetLowering::getTargetNodeName(unsigned Opcode) const {
     return "RISCVISD::FMV_W_X_RV64";
   case RISCVISD::FMV_X_ANYEXTW_RV64:
     return "RISCVISD::FMV_X_ANYEXTW_RV64";
+  case RISCVISD::READ_CYCLE_WIDE:
+    return "RISCVISD::READ_CYCLE_WIDE";
   }
   return nullptr;
+}
+
+/// getConstraintType - Given a constraint letter, return the type of
+/// constraint it is for this target.
+RISCVTargetLowering::ConstraintType
+RISCVTargetLowering::getConstraintType(StringRef Constraint) const {
+  if (Constraint.size() == 1) {
+    switch (Constraint[0]) {
+    default:
+      break;
+    case 'f':
+      return C_RegisterClass;
+    }
+  }
+  return TargetLowering::getConstraintType(Constraint);
 }
 
 std::pair<unsigned, const TargetRegisterClass *>
@@ -2151,9 +2422,61 @@ RISCVTargetLowering::getRegForInlineAsmConstraint(const TargetRegisterInfo *TRI,
     switch (Constraint[0]) {
     case 'r':
       return std::make_pair(0U, &RISCV::GPRRegClass);
+    case 'f':
+      if (Subtarget.hasStdExtF() && VT == MVT::f32)
+        return std::make_pair(0U, &RISCV::FPR32RegClass);
+      if (Subtarget.hasStdExtD() && VT == MVT::f64)
+        return std::make_pair(0U, &RISCV::FPR64RegClass);
+      break;
     default:
       break;
     }
+  }
+
+  // Since TargetLowering::getRegForInlineAsmConstraint uses the name of the
+  // TableGen record rather than the AsmName to choose registers for InlineAsm
+  // constraints, plus we want to match those names to the widest floating point
+  // register type available, manually select floating point registers here.
+  if (Subtarget.hasStdExtF() || Subtarget.hasStdExtD()) {
+    std::pair<unsigned, unsigned> FReg =
+        StringSwitch<std::pair<unsigned, unsigned>>(Constraint.lower())
+            .Case("{f0}", {RISCV::F0_32, RISCV::F0_64})
+            .Case("{f1}", {RISCV::F1_32, RISCV::F1_64})
+            .Case("{f2}", {RISCV::F2_32, RISCV::F2_64})
+            .Case("{f3}", {RISCV::F3_32, RISCV::F3_64})
+            .Case("{f4}", {RISCV::F4_32, RISCV::F4_64})
+            .Case("{f5}", {RISCV::F5_32, RISCV::F5_64})
+            .Case("{f6}", {RISCV::F6_32, RISCV::F6_64})
+            .Case("{f7}", {RISCV::F7_32, RISCV::F7_64})
+            .Case("{f8}", {RISCV::F8_32, RISCV::F8_64})
+            .Case("{f9}", {RISCV::F9_32, RISCV::F9_64})
+            .Case("{f10}", {RISCV::F10_32, RISCV::F10_64})
+            .Case("{f11}", {RISCV::F11_32, RISCV::F11_64})
+            .Case("{f12}", {RISCV::F12_32, RISCV::F12_64})
+            .Case("{f13}", {RISCV::F13_32, RISCV::F13_64})
+            .Case("{f14}", {RISCV::F14_32, RISCV::F14_64})
+            .Case("{f15}", {RISCV::F15_32, RISCV::F15_64})
+            .Case("{f16}", {RISCV::F16_32, RISCV::F16_64})
+            .Case("{f17}", {RISCV::F17_32, RISCV::F17_64})
+            .Case("{f18}", {RISCV::F18_32, RISCV::F18_64})
+            .Case("{f19}", {RISCV::F19_32, RISCV::F19_64})
+            .Case("{f20}", {RISCV::F20_32, RISCV::F20_64})
+            .Case("{f21}", {RISCV::F21_32, RISCV::F21_64})
+            .Case("{f22}", {RISCV::F22_32, RISCV::F22_64})
+            .Case("{f23}", {RISCV::F23_32, RISCV::F23_64})
+            .Case("{f24}", {RISCV::F24_32, RISCV::F24_64})
+            .Case("{f25}", {RISCV::F25_32, RISCV::F25_64})
+            .Case("{f26}", {RISCV::F26_32, RISCV::F26_64})
+            .Case("{f27}", {RISCV::F27_32, RISCV::F27_64})
+            .Case("{f28}", {RISCV::F28_32, RISCV::F28_64})
+            .Case("{f29}", {RISCV::F29_32, RISCV::F29_64})
+            .Case("{f30}", {RISCV::F30_32, RISCV::F30_64})
+            .Case("{f31}", {RISCV::F31_32, RISCV::F31_64})
+            .Default({-1U, -1U});
+    if (FReg.first != -1U)
+      return Subtarget.hasStdExtD()
+                 ? std::make_pair(FReg.second, &RISCV::FPR64RegClass)
+                 : std::make_pair(FReg.first, &RISCV::FPR32RegClass);
   }
 
   return TargetLowering::getRegForInlineAsmConstraint(TRI, Constraint, VT);
@@ -2352,4 +2675,14 @@ Value *RISCVTargetLowering::emitMaskedAtomicCmpXchgIntrinsic(
   if (XLen == 64)
     Result = Builder.CreateTrunc(Result, Builder.getInt32Ty());
   return Result;
+}
+
+unsigned RISCVTargetLowering::getExceptionPointerRegister(
+    const Constant *PersonalityFn) const {
+  return RISCV::X10;
+}
+
+unsigned RISCVTargetLowering::getExceptionSelectorRegister(
+    const Constant *PersonalityFn) const {
+  return RISCV::X11;
 }

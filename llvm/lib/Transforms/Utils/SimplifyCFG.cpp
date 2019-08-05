@@ -864,7 +864,7 @@ bool SimplifyCFGOpt::SimplifyEqualityComparisonWithOnlyPredecessor(
       return true;
     }
 
-    SwitchInst *SI = cast<SwitchInst>(TI);
+    SwitchInstProfUpdateWrapper SI = *cast<SwitchInst>(TI);
     // Okay, TI has cases that are statically dead, prune them away.
     SmallPtrSet<Constant *, 16> DeadCases;
     for (unsigned i = 0, e = PredCases.size(); i != e; ++i)
@@ -873,30 +873,13 @@ bool SimplifyCFGOpt::SimplifyEqualityComparisonWithOnlyPredecessor(
     LLVM_DEBUG(dbgs() << "Threading pred instr: " << *Pred->getTerminator()
                       << "Through successor TI: " << *TI);
 
-    // Collect branch weights into a vector.
-    SmallVector<uint32_t, 8> Weights;
-    MDNode *MD = SI->getMetadata(LLVMContext::MD_prof);
-    bool HasWeight = MD && (MD->getNumOperands() == 2 + SI->getNumCases());
-    if (HasWeight)
-      for (unsigned MD_i = 1, MD_e = MD->getNumOperands(); MD_i < MD_e;
-           ++MD_i) {
-        ConstantInt *CI = mdconst::extract<ConstantInt>(MD->getOperand(MD_i));
-        Weights.push_back(CI->getValue().getZExtValue());
-      }
     for (SwitchInst::CaseIt i = SI->case_end(), e = SI->case_begin(); i != e;) {
       --i;
       if (DeadCases.count(i->getCaseValue())) {
-        if (HasWeight) {
-          std::swap(Weights[i->getCaseIndex() + 1], Weights.back());
-          Weights.pop_back();
-        }
         i->getCaseSuccessor()->removePredecessor(TI->getParent());
-        SI->removeCase(i);
+        SI.removeCase(i);
       }
     }
-    if (HasWeight && Weights.size() >= 2)
-      setBranchWeights(SI, Weights);
-
     LLVM_DEBUG(dbgs() << "Leaving: " << *TI << "\n");
     return true;
   }
@@ -1445,9 +1428,10 @@ HoistTerminator:
 static bool canSinkInstructions(
     ArrayRef<Instruction *> Insts,
     DenseMap<Instruction *, SmallVector<Value *, 4>> &PHIOperands) {
-  // Prune out obviously bad instructions to move. Any non-store instruction
-  // must have exactly one use, and we check later that use is by a single,
-  // common PHI instruction in the successor.
+  // Prune out obviously bad instructions to move. Each instruction must have
+  // exactly zero or one use, and we check later that use is by a single, common
+  // PHI instruction in the successor.
+  bool HasUse = !Insts.front()->user_empty();
   for (auto *I : Insts) {
     // These instructions may change or break semantics if moved.
     if (isa<PHINode>(I) || I->isEHPad() || isa<AllocaInst>(I) ||
@@ -1461,9 +1445,10 @@ static bool canSinkInstructions(
       if (C->isInlineAsm())
         return false;
 
-    // Everything must have only one use too, apart from stores which
-    // have no uses.
-    if (!isa<StoreInst>(I) && !I->hasOneUse())
+    // Each instruction must have zero or one use.
+    if (HasUse && !I->hasOneUse())
+      return false;
+    if (!HasUse && !I->user_empty())
       return false;
   }
 
@@ -1472,11 +1457,11 @@ static bool canSinkInstructions(
     if (!I->isSameOperationAs(I0))
       return false;
 
-  // All instructions in Insts are known to be the same opcode. If they aren't
-  // stores, check the only user of each is a PHI or in the same block as the
-  // instruction, because if a user is in the same block as an instruction
-  // we're contemplating sinking, it must already be determined to be sinkable.
-  if (!isa<StoreInst>(I0)) {
+  // All instructions in Insts are known to be the same opcode. If they have a
+  // use, check that the only user is a PHI or in the same block as the
+  // instruction, because if a user is in the same block as an instruction we're
+  // contemplating sinking, it must already be determined to be sinkable.
+  if (HasUse) {
     auto *PNUse = dyn_cast<PHINode>(*I0->user_begin());
     auto *Succ = I0->getParent()->getTerminator()->getSuccessor(0);
     if (!all_of(Insts, [&PNUse,&Succ](const Instruction *I) -> bool {
@@ -1554,7 +1539,7 @@ static bool sinkLastInstruction(ArrayRef<BasicBlock*> Blocks) {
   // it is slightly over-aggressive - it gets confused by commutative instructions
   // so double-check it here.
   Instruction *I0 = Insts.front();
-  if (!isa<StoreInst>(I0)) {
+  if (!I0->user_empty()) {
     auto *PNUse = dyn_cast<PHINode>(*I0->user_begin());
     if (!all_of(Insts, [&PNUse](const Instruction *I) -> bool {
           auto *U = cast<Instruction>(*I->user_begin());
@@ -1612,11 +1597,10 @@ static bool sinkLastInstruction(ArrayRef<BasicBlock*> Blocks) {
       I0->andIRFlags(I);
     }
 
-  if (!isa<StoreInst>(I0)) {
+  if (!I0->user_empty()) {
     // canSinkLastInstruction checked that all instructions were used by
     // one and only one PHI node. Find that now, RAUW it to our common
     // instruction and nuke it.
-    assert(I0->hasOneUse());
     auto *PN = cast<PHINode>(*I0->user_begin());
     PN->replaceAllUsesWith(I0);
     PN->eraseFromParent();
@@ -2825,8 +2809,7 @@ bool llvm::FoldBranchToCommonDest(BranchInst *BI, MemorySSAUpdater *MSSAU,
           }
         }
         // Update PHI Node.
-        PHIs[i]->setIncomingValue(PHIs[i]->getBasicBlockIndex(PBI->getParent()),
-                                  MergedCond);
+	PHIs[i]->setIncomingValueForBlock(PBI->getParent(), MergedCond);
       }
 
       // PBI is changed to branch to TrueDest below. Remove itself from
@@ -3643,20 +3626,16 @@ bool SimplifyCFGOpt::tryToSimplifyUncondBranchWithICmpInIt(
   // the switch to the merge point on the compared value.
   BasicBlock *NewBB =
       BasicBlock::Create(BB->getContext(), "switch.edge", BB->getParent(), BB);
-  SmallVector<uint64_t, 8> Weights;
-  bool HasWeights = HasBranchWeights(SI);
-  if (HasWeights) {
-    GetBranchWeights(SI, Weights);
-    if (Weights.size() == 1 + SI->getNumCases()) {
-      // Split weight for default case to case for "Cst".
-      Weights[0] = (Weights[0] + 1) >> 1;
-      Weights.push_back(Weights[0]);
-
-      SmallVector<uint32_t, 8> MDWeights(Weights.begin(), Weights.end());
-      setBranchWeights(SI, MDWeights);
+  {
+    SwitchInstProfUpdateWrapper SIW(*SI);
+    auto W0 = SIW.getSuccessorWeight(0);
+    SwitchInstProfUpdateWrapper::CaseWeightOpt NewW;
+    if (W0) {
+      NewW = ((uint64_t(*W0) + 1) >> 1);
+      SIW.setSuccessorWeight(0, *NewW);
     }
+    SIW.addCase(Cst, NewBB, NewW);
   }
-  SI->addCase(Cst, NewBB);
 
   // NewBB branches to the phi block, add the uncond branch and the phi entry.
   Builder.SetInsertPoint(NewBB);
@@ -4218,14 +4197,15 @@ bool SimplifyCFGOpt::SimplifyUnreachable(UnreachableInst *UI) {
         }
       }
     } else if (auto *SI = dyn_cast<SwitchInst>(TI)) {
-      for (auto i = SI->case_begin(), e = SI->case_end(); i != e;) {
+      SwitchInstProfUpdateWrapper SU(*SI);
+      for (auto i = SU->case_begin(), e = SU->case_end(); i != e;) {
         if (i->getCaseSuccessor() != BB) {
           ++i;
           continue;
         }
-        BB->removePredecessor(SI->getParent());
-        i = SI->removeCase(i);
-        e = SI->case_end();
+        BB->removePredecessor(SU->getParent());
+        i = SU.removeCase(i);
+        e = SU->case_end();
         Changed = true;
       }
     } else if (auto *II = dyn_cast<InvokeInst>(TI)) {
@@ -4294,6 +4274,17 @@ static bool CasesAreContiguous(SmallVectorImpl<ConstantInt *> &Cases) {
       return false;
   }
   return true;
+}
+
+static void createUnreachableSwitchDefault(SwitchInst *Switch) {
+  LLVM_DEBUG(dbgs() << "SimplifyCFG: switch default is dead.\n");
+  BasicBlock *NewDefaultBlock =
+     SplitBlockPredecessors(Switch->getDefaultDest(), Switch->getParent(), "");
+  Switch->setDefaultDest(&*NewDefaultBlock);
+  SplitBlock(&*NewDefaultBlock, &NewDefaultBlock->front());
+  auto *NewTerminator = NewDefaultBlock->getTerminator();
+  new UnreachableInst(Switch->getContext(), NewTerminator);
+  EraseTerminatorAndDCECond(NewTerminator);
 }
 
 /// Turn a switch with two reachable destinations into an integer range
@@ -4404,6 +4395,11 @@ static bool TurnSwitchRangeIntoICmp(SwitchInst *SI, IRBuilder<> &Builder) {
       cast<PHINode>(BBI)->removeIncomingValue(SI->getParent());
   }
 
+  // Clean up the default block - it may have phis or other instructions before
+  // the unreachable terminator.
+  if (!HasDefault)
+    createUnreachableSwitchDefault(SI);
+
   // Drop the switch.
   SI->eraseFromParent();
 
@@ -4448,44 +4444,24 @@ static bool eliminateDeadSwitchCases(SwitchInst *SI, AssumptionCache *AC,
   if (HasDefault && DeadCases.empty() &&
       NumUnknownBits < 64 /* avoid overflow */ &&
       SI->getNumCases() == (1ULL << NumUnknownBits)) {
-    LLVM_DEBUG(dbgs() << "SimplifyCFG: switch default is dead.\n");
-    BasicBlock *NewDefault =
-        SplitBlockPredecessors(SI->getDefaultDest(), SI->getParent(), "");
-    SI->setDefaultDest(&*NewDefault);
-    SplitBlock(&*NewDefault, &NewDefault->front());
-    auto *OldTI = NewDefault->getTerminator();
-    new UnreachableInst(SI->getContext(), OldTI);
-    EraseTerminatorAndDCECond(OldTI);
+    createUnreachableSwitchDefault(SI);
     return true;
   }
 
-  SmallVector<uint64_t, 8> Weights;
-  bool HasWeight = HasBranchWeights(SI);
-  if (HasWeight) {
-    GetBranchWeights(SI, Weights);
-    HasWeight = (Weights.size() == 1 + SI->getNumCases());
-  }
+  if (DeadCases.empty())
+    return false;
 
-  // Remove dead cases from the switch.
+  SwitchInstProfUpdateWrapper SIW(*SI);
   for (ConstantInt *DeadCase : DeadCases) {
     SwitchInst::CaseIt CaseI = SI->findCaseValue(DeadCase);
     assert(CaseI != SI->case_default() &&
            "Case was not found. Probably mistake in DeadCases forming.");
-    if (HasWeight) {
-      std::swap(Weights[CaseI->getCaseIndex() + 1], Weights.back());
-      Weights.pop_back();
-    }
-
     // Prune unused values from PHI nodes.
     CaseI->getCaseSuccessor()->removePredecessor(SI->getParent());
-    SI->removeCase(CaseI);
-  }
-  if (HasWeight && Weights.size() >= 2) {
-    SmallVector<uint32_t, 8> MDWeights(Weights.begin(), Weights.end());
-    setBranchWeights(SI, MDWeights);
+    SIW.removeCase(CaseI);
   }
 
-  return !DeadCases.empty();
+  return true;
 }
 
 /// If BB would be eligible for simplification by
@@ -5058,7 +5034,7 @@ SwitchLookupTable::SwitchLookupTable(
   ArrayType *ArrayTy = ArrayType::get(ValueType, TableSize);
   Constant *Initializer = ConstantArray::get(ArrayTy, TableContents);
 
-  Array = new GlobalVariable(M, ArrayTy, /*constant=*/true,
+  Array = new GlobalVariable(M, ArrayTy, /*isConstant=*/true,
                              GlobalVariable::PrivateLinkage, Initializer,
                              "switch.table." + FuncName);
   Array->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);

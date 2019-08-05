@@ -14,17 +14,14 @@
 #include "mutex.h"
 #include "string_utils.h"
 
-#include <limits.h> // for PAGE_SIZE
-#include <stdlib.h> // for getenv()
+#include <lib/sync/mutex.h> // for sync_mutex_t
+#include <limits.h>         // for PAGE_SIZE
+#include <stdlib.h>         // for getenv()
+#include <zircon/compiler.h>
 #include <zircon/sanitizer.h>
 #include <zircon/syscalls.h>
 
 namespace scudo {
-
-void yieldPlatform() {
-  const zx_status_t Status = _zx_nanosleep(0);
-  CHECK_EQ(Status, ZX_OK);
-}
 
 uptr getPageSize() { return PAGE_SIZE; }
 
@@ -43,7 +40,7 @@ static void *allocateVmar(uptr Size, MapPlatformData *Data, bool AllowNoMem) {
       _zx_vmar_root_self(),
       ZX_VM_CAN_MAP_READ | ZX_VM_CAN_MAP_WRITE | ZX_VM_CAN_MAP_SPECIFIC, 0,
       Size, &Data->Vmar, &Data->VmarBase);
-  if (Status != ZX_OK) {
+  if (UNLIKELY(Status != ZX_OK)) {
     if (Status != ZX_ERR_NO_MEMORY || !AllowNoMem)
       dieOnMapUnmapError(Status == ZX_ERR_NO_MEMORY);
     return nullptr;
@@ -81,7 +78,7 @@ void *map(void *Addr, uptr Size, const char *Name, uptr Flags,
   } else {
     // Otherwise, create a Vmo and set its name.
     Status = _zx_vmo_create(Size, ZX_VMO_RESIZABLE, &Vmo);
-    if (Status != ZX_OK) {
+    if (UNLIKELY(Status != ZX_OK)) {
       if (Status != ZX_ERR_NO_MEMORY || !AllowNoMem)
         dieOnMapUnmapError(Status == ZX_ERR_NO_MEMORY);
       return nullptr;
@@ -90,7 +87,8 @@ void *map(void *Addr, uptr Size, const char *Name, uptr Flags,
   }
 
   uintptr_t P;
-  zx_vm_option_t MapFlags = ZX_VM_PERM_READ | ZX_VM_PERM_WRITE;
+  zx_vm_option_t MapFlags =
+      ZX_VM_PERM_READ | ZX_VM_PERM_WRITE | ZX_VM_ALLOW_FAULTS;
   const uint64_t Offset =
       Addr ? reinterpret_cast<uintptr_t>(Addr) - Data->VmarBase : 0;
   if (Offset)
@@ -104,7 +102,7 @@ void *map(void *Addr, uptr Size, const char *Name, uptr Flags,
   } else {
     CHECK_EQ(_zx_handle_close(Vmo), ZX_OK);
   }
-  if (Status != ZX_OK) {
+  if (UNLIKELY(Status != ZX_OK)) {
     if (Status != ZX_ERR_NO_MEMORY || !AllowNoMem)
       dieOnMapUnmapError(Status == ZX_ERR_NO_MEMORY);
     return nullptr;
@@ -127,7 +125,7 @@ void unmap(void *Addr, uptr Size, uptr Flags, MapPlatformData *Data) {
     const zx_handle_t Vmar = Data ? Data->Vmar : _zx_vmar_root_self();
     const zx_status_t Status =
         _zx_vmar_unmap(Vmar, reinterpret_cast<uintptr_t>(Addr), Size);
-    if (Status != ZX_OK)
+    if (UNLIKELY(Status != ZX_OK))
       dieOnMapUnmapError();
   }
   if (Data) {
@@ -149,18 +147,23 @@ void releasePagesToOS(UNUSED uptr BaseAddress, uptr Offset, uptr Size,
 
 const char *getEnv(const char *Name) { return getenv(Name); }
 
-void BlockingMutex::wait() {
-  const zx_status_t Status =
-      _zx_futex_wait(reinterpret_cast<zx_futex_t *>(OpaqueStorage), MtxSleeping,
-                     ZX_HANDLE_INVALID, ZX_TIME_INFINITE);
-  if (Status != ZX_ERR_BAD_STATE)
-    CHECK_EQ(Status, ZX_OK); // Normal race
+// Note: we need to flag these methods with __TA_NO_THREAD_SAFETY_ANALYSIS
+// because the Fuchsia implementation of sync_mutex_t has clang thread safety
+// annotations. Were we to apply proper capability annotations to the top level
+// HybridMutex class itself, they would not be needed. As it stands, the
+// thread analysis thinks that we are locking the mutex and accidentally leaving
+// it locked on the way out.
+bool HybridMutex::tryLock() __TA_NO_THREAD_SAFETY_ANALYSIS {
+  // Size and alignment must be compatible between both types.
+  return sync_mutex_trylock(&M) == ZX_OK;
 }
 
-void BlockingMutex::wake() {
-  const zx_status_t Status =
-      _zx_futex_wake(reinterpret_cast<zx_futex_t *>(OpaqueStorage), 1);
-  CHECK_EQ(Status, ZX_OK);
+void HybridMutex::lockSlow() __TA_NO_THREAD_SAFETY_ANALYSIS {
+  sync_mutex_lock(&M);
+}
+
+void HybridMutex::unlock() __TA_NO_THREAD_SAFETY_ANALYSIS {
+  sync_mutex_unlock(&M);
 }
 
 u64 getMonotonicTime() { return _zx_clock_get_monotonic(); }
@@ -169,7 +172,7 @@ u32 getNumberOfCPUs() { return _zx_system_get_num_cpus(); }
 
 bool getRandom(void *Buffer, uptr Length, bool Blocking) {
   COMPILER_CHECK(MaxRandomLength <= ZX_CPRNG_DRAW_MAX_LEN);
-  if (!Buffer || !Length || Length > MaxRandomLength)
+  if (UNLIKELY(!Buffer || !Length || Length > MaxRandomLength))
     return false;
   _zx_cprng_draw(Buffer, Length);
   return true;

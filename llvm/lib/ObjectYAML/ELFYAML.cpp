@@ -410,6 +410,7 @@ void ScalarBitSetTraits<ELFYAML::ELF_EF>::bitset(IO &IO,
     BCaseMask(EF_AMDGPU_MACH_AMDGCN_GFX902, EF_AMDGPU_MACH);
     BCaseMask(EF_AMDGPU_MACH_AMDGCN_GFX904, EF_AMDGPU_MACH);
     BCaseMask(EF_AMDGPU_MACH_AMDGCN_GFX906, EF_AMDGPU_MACH);
+    BCaseMask(EF_AMDGPU_MACH_AMDGCN_GFX908, EF_AMDGPU_MACH);
     BCaseMask(EF_AMDGPU_MACH_AMDGCN_GFX909, EF_AMDGPU_MACH);
     BCaseMask(EF_AMDGPU_MACH_AMDGCN_GFX1010, EF_AMDGPU_MACH);
     BCaseMask(EF_AMDGPU_MACH_AMDGCN_GFX1011, EF_AMDGPU_MACH);
@@ -555,6 +556,7 @@ void ScalarEnumerationTraits<ELFYAML::ELF_SHN>::enumeration(
   ECase(SHN_COMMON);
   ECase(SHN_XINDEX);
   ECase(SHN_HIRESERVE);
+  ECase(SHN_AMDGPU_LDS);
   ECase(SHN_HEXAGON_SCOMMON);
   ECase(SHN_HEXAGON_SCOMMON_1);
   ECase(SHN_HEXAGON_SCOMMON_2);
@@ -841,6 +843,11 @@ void MappingTraits<ELFYAML::FileHeader>::mapping(IO &IO,
   IO.mapRequired("Machine", FileHdr.Machine);
   IO.mapOptional("Flags", FileHdr.Flags, ELFYAML::ELF_EF(0));
   IO.mapOptional("Entry", FileHdr.Entry, Hex64(0));
+
+  IO.mapOptional("SHEntSize", FileHdr.SHEntSize);
+  IO.mapOptional("SHOffset", FileHdr.SHOffset);
+  IO.mapOptional("SHNum", FileHdr.SHNum);
+  IO.mapOptional("SHStrNdx", FileHdr.SHStrNdx);
 }
 
 void MappingTraits<ELFYAML::ProgramHeader>::mapping(
@@ -905,6 +912,14 @@ static void commonSectionMapping(IO &IO, ELFYAML::Section &Section) {
   IO.mapOptional("Link", Section.Link, StringRef());
   IO.mapOptional("AddressAlign", Section.AddressAlign, Hex64(0));
   IO.mapOptional("EntSize", Section.EntSize);
+
+  // obj2yaml does not dump these fields. They are expected to be empty when we
+  // are producing YAML, because yaml2obj sets appropriate values for sh_offset
+  // and sh_size automatically when they are not explicitly defined.
+  assert(!IO.outputting() ||
+         (!Section.ShOffset.hasValue() && !Section.ShSize.hasValue()));
+  IO.mapOptional("ShOffset", Section.ShOffset);
+  IO.mapOptional("ShSize", Section.ShSize);
 }
 
 static void sectionMapping(IO &IO, ELFYAML::DynamicSection &Section) {
@@ -917,7 +932,7 @@ static void sectionMapping(IO &IO, ELFYAML::RawContentSection &Section) {
   commonSectionMapping(IO, Section);
   IO.mapOptional("Content", Section.Content);
   IO.mapOptional("Size", Section.Size);
-  IO.mapOptional("Info", Section.Info, Hex64(0));
+  IO.mapOptional("Info", Section.Info);
 }
 
 static void sectionMapping(IO &IO, ELFYAML::NoBitsSection &Section) {

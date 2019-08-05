@@ -591,10 +591,15 @@ enum SymbolShndxType {
   SYMBOL_SIMPLE_INDEX = 0,
   SYMBOL_ABS = ELF::SHN_ABS,
   SYMBOL_COMMON = ELF::SHN_COMMON,
+  SYMBOL_LOPROC = ELF::SHN_LOPROC,
+  SYMBOL_AMDGPU_LDS = ELF::SHN_AMDGPU_LDS,
   SYMBOL_HEXAGON_SCOMMON = ELF::SHN_HEXAGON_SCOMMON,
   SYMBOL_HEXAGON_SCOMMON_2 = ELF::SHN_HEXAGON_SCOMMON_2,
   SYMBOL_HEXAGON_SCOMMON_4 = ELF::SHN_HEXAGON_SCOMMON_4,
   SYMBOL_HEXAGON_SCOMMON_8 = ELF::SHN_HEXAGON_SCOMMON_8,
+  SYMBOL_HIPROC = ELF::SHN_HIPROC,
+  SYMBOL_LOOS = ELF::SHN_LOOS,
+  SYMBOL_HIOS = ELF::SHN_HIOS,
   SYMBOL_XINDEX = ELF::SHN_XINDEX,
 };
 
@@ -1013,6 +1018,7 @@ public:
   uint32_t Flags;
 
   bool HadShdrs = true;
+  bool MustBeRelocatable = false;
   StringTableSection *SectionNames = nullptr;
   SymbolTableSection *SymbolTable = nullptr;
   SectionIndexSection *SectionIndexTable = nullptr;
@@ -1038,6 +1044,7 @@ public:
   template <class T, class... Ts> T &addSection(Ts &&... Args) {
     auto Sec = llvm::make_unique<T>(std::forward<Ts>(Args)...);
     auto Ptr = Sec.get();
+    MustBeRelocatable |= isa<RelocationSection>(*Ptr);
     Sections.emplace_back(std::move(Sec));
     Ptr->Index = Sections.size();
     return *Ptr;
@@ -1045,6 +1052,9 @@ public:
   Segment &addSegment(ArrayRef<uint8_t> Data) {
     Segments.emplace_back(llvm::make_unique<Segment>(Data));
     return *Segments.back();
+  }
+  bool isRelocatable() const {
+    return (Type != ELF::ET_DYN && Type != ELF::ET_EXEC) || MustBeRelocatable;
   }
 };
 

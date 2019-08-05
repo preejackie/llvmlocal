@@ -75,7 +75,7 @@ TEST_F(GISelMITest, DstOpSrcOp) {
   if (!TM)
     return;
 
-  SmallVector<unsigned, 4> Copies;
+  SmallVector<Register, 4> Copies;
   collectCopies(Copies, MF);
 
   LLT s64 = LLT::scalar(64);
@@ -100,7 +100,7 @@ TEST_F(GISelMITest, BuildUnmerge) {
   if (!TM)
     return;
 
-  SmallVector<unsigned, 4> Copies;
+  SmallVector<Register, 4> Copies;
   collectCopies(Copies, MF);
   B.buildUnmerge(LLT::scalar(32), Copies[0]);
   B.buildUnmerge(LLT::scalar(16), Copies[1]);
@@ -120,7 +120,7 @@ TEST_F(GISelMITest, TestBuildFPInsts) {
   if (!TM)
     return;
 
-  SmallVector<unsigned, 4> Copies;
+  SmallVector<Register, 4> Copies;
   collectCopies(Copies, MF);
 
   LLT S64 = LLT::scalar(64);
@@ -152,7 +152,7 @@ TEST_F(GISelMITest, BuildIntrinsic) {
     return;
 
   LLT S64 = LLT::scalar(64);
-  SmallVector<unsigned, 4> Copies;
+  SmallVector<Register, 4> Copies;
   collectCopies(Copies, MF);
 
   // Make sure DstOp version works. sqrt is just a placeholder intrinsic.
@@ -160,7 +160,7 @@ TEST_F(GISelMITest, BuildIntrinsic) {
     .addUse(Copies[0]);
 
   // Make sure register version works
-  SmallVector<unsigned, 1> Results;
+  SmallVector<Register, 1> Results;
   Results.push_back(MRI->createGenericVirtualRegister(S64));
   B.buildIntrinsic(Intrinsic::sqrt, Results, false)
     .addUse(Copies[1]);
@@ -181,7 +181,7 @@ TEST_F(GISelMITest, BuildXor) {
 
   LLT S64 = LLT::scalar(64);
   LLT S128 = LLT::scalar(128);
-  SmallVector<unsigned, 4> Copies;
+  SmallVector<Register, 4> Copies;
   collectCopies(Copies, MF);
   B.buildXor(S64, Copies[0], Copies[1]);
   B.buildNot(S64, Copies[0]);
@@ -208,7 +208,7 @@ TEST_F(GISelMITest, BuildBitCounts) {
     return;
 
   LLT S32 = LLT::scalar(32);
-  SmallVector<unsigned, 4> Copies;
+  SmallVector<Register, 4> Copies;
   collectCopies(Copies, MF);
 
   B.buildCTPOP(S32, Copies[0]);
@@ -235,7 +235,7 @@ TEST_F(GISelMITest, BuildCasts) {
     return;
 
   LLT S32 = LLT::scalar(32);
-  SmallVector<unsigned, 4> Copies;
+  SmallVector<Register, 4> Copies;
   collectCopies(Copies, MF);
 
   B.buildUITOFP(S32, Copies[0]);
@@ -259,7 +259,7 @@ TEST_F(GISelMITest, BuildMinMax) {
     return;
 
   LLT S64 = LLT::scalar(64);
-  SmallVector<unsigned, 4> Copies;
+  SmallVector<Register, 4> Copies;
   collectCopies(Copies, MF);
 
   B.buildSMin(S64, Copies[0], Copies[1]);
@@ -274,6 +274,36 @@ TEST_F(GISelMITest, BuildMinMax) {
   ; CHECK: [[SMAX0:%[0-9]+]]:_(s64) = G_SMAX [[COPY0]]:_, [[COPY1]]:_
   ; CHECK: [[UMIN0:%[0-9]+]]:_(s64) = G_UMIN [[COPY0]]:_, [[COPY1]]:_
   ; CHECK: [[UMAX0:%[0-9]+]]:_(s64) = G_UMAX [[COPY0]]:_, [[COPY1]]:_
+  )";
+
+  EXPECT_TRUE(CheckMachineFunction(*MF, CheckStr)) << *MF;
+}
+
+TEST_F(GISelMITest, BuildAtomicRMW) {
+  if (!TM)
+    return;
+
+  LLT S64 = LLT::scalar(64);
+  LLT P0 = LLT::pointer(0, 64);
+  SmallVector<Register, 4> Copies;
+  collectCopies(Copies, MF);
+
+  MachineMemOperand *MMO =
+    MF->getMachineMemOperand(
+      MachinePointerInfo(),
+      MachineMemOperand::MOLoad | MachineMemOperand::MOStore,
+      8, 8, AAMDNodes(), nullptr, SyncScope::System, AtomicOrdering::Unordered);
+
+  auto Ptr = B.buildUndef(P0);
+  B.buildAtomicRMWFAdd(S64, Ptr, Copies[0], *MMO);
+  B.buildAtomicRMWFSub(S64, Ptr, Copies[0], *MMO);
+
+  auto CheckStr = R"(
+  ; CHECK: [[COPY0:%[0-9]+]]:_(s64) = COPY $x0
+  ; CHECK: [[COPY1:%[0-9]+]]:_(s64) = COPY $x1
+  ; CHECK: [[PTR:%[0-9]+]]:_(p0) = G_IMPLICIT_DEF
+  ; CHECK: [[FADD:%[0-9]+]]:_(s64) = G_ATOMICRMW_FADD [[PTR]]:_(p0), [[COPY0]]:_ :: (load store unordered 8)
+  ; CHECK: [[FSUB:%[0-9]+]]:_(s64) = G_ATOMICRMW_FSUB [[PTR]]:_(p0), [[COPY0]]:_ :: (load store unordered 8)
   )";
 
   EXPECT_TRUE(CheckMachineFunction(*MF, CheckStr)) << *MF;

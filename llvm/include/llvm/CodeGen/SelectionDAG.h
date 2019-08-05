@@ -267,6 +267,16 @@ class SelectionDAG {
   /// Tracks dbg_value and dbg_label information through SDISel.
   SDDbgInfo *DbgInfo;
 
+  using CallSiteInfo = MachineFunction::CallSiteInfo;
+  using CallSiteInfoImpl = MachineFunction::CallSiteInfoImpl;
+
+  struct CallSiteDbgInfo {
+    CallSiteInfo CSInfo;
+    MDNode *HeapAllocSite = nullptr;
+  };
+
+  DenseMap<const SDNode *, CallSiteDbgInfo> SDCallSiteDbgInfo;
+
   uint16_t NextPersistentId = 0;
 
 public:
@@ -1031,7 +1041,8 @@ public:
     unsigned Align = 0,
     MachineMemOperand::Flags Flags
     = MachineMemOperand::MOLoad | MachineMemOperand::MOStore,
-    unsigned Size = 0);
+    unsigned Size = 0,
+    const AAMDNodes &AAInfo = AAMDNodes());
 
   SDValue getMemIntrinsicNode(unsigned Opcode, const SDLoc &dl, SDVTList VTList,
                               ArrayRef<SDValue> Ops, EVT MemVT,
@@ -1468,6 +1479,11 @@ public:
   bool MaskedValueIsZero(SDValue Op, const APInt &Mask,
                          const APInt &DemandedElts, unsigned Depth = 0) const;
 
+  /// Return true if '(Op & Mask) == Mask'.
+  /// Op and Mask are known to be the same type.
+  bool MaskedValueIsAllOnes(SDValue Op, const APInt &Mask,
+                            unsigned Depth = 0) const;
+
   /// Determine which bits of Op are known to be either zero or one and return
   /// them in Known. For vectors, the known bits are those that are shared by
   /// every vector element.
@@ -1578,9 +1594,12 @@ public:
   /// Extract. The reduction must use one of the opcodes listed in /p
   /// CandidateBinOps and on success /p BinOp will contain the matching opcode.
   /// Returns the vector that is being reduced on, or SDValue() if a reduction
-  /// was not matched.
+  /// was not matched. If \p AllowPartials is set then in the case of a
+  /// reduction pattern that only matches the first few stages, the extracted
+  /// subvector of the start of the reduction is returned.
   SDValue matchBinOpReduction(SDNode *Extract, ISD::NodeType &BinOp,
-                              ArrayRef<ISD::NodeType> CandidateBinOps);
+                              ArrayRef<ISD::NodeType> CandidateBinOps,
+                              bool AllowPartials = false);
 
   /// Utility function used by legalize and lowering to
   /// "unroll" a vector operation by splitting out the scalars and operating
@@ -1651,6 +1670,29 @@ public:
   inline bool isConstantValueOfAnyType(SDValue N) {
     return isConstantIntBuildVectorOrConstantInt(N) ||
            isConstantFPBuildVectorOrConstantFP(N);
+  }
+
+  void addCallSiteInfo(const SDNode *CallNode, CallSiteInfoImpl &&CallInfo) {
+    SDCallSiteDbgInfo[CallNode].CSInfo = std::move(CallInfo);
+  }
+
+  CallSiteInfo getSDCallSiteInfo(const SDNode *CallNode) {
+    auto I = SDCallSiteDbgInfo.find(CallNode);
+    if (I != SDCallSiteDbgInfo.end())
+      return std::move(I->second).CSInfo;
+    return CallSiteInfo();
+  }
+
+  void addHeapAllocSite(const SDNode *Node, MDNode *MD) {
+    SDCallSiteDbgInfo[Node].HeapAllocSite = MD;
+  }
+
+  /// Return the HeapAllocSite type associated with the SDNode, if it exists.
+  MDNode *getHeapAllocSite(const SDNode* Node) {
+    auto It = SDCallSiteDbgInfo.find(Node);
+    if (It == SDCallSiteDbgInfo.end())
+      return nullptr;
+    return It->second.HeapAllocSite;
   }
 
 private:

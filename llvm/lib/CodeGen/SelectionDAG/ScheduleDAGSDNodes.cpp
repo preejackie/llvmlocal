@@ -853,14 +853,20 @@ EmitSchedule(MachineBasicBlock::iterator &InsertPos) {
     if (Before == After)
       return nullptr;
 
+    MachineInstr *MI;
     if (Before == BB->end()) {
       // There were no prior instructions; the new ones must start at the
       // beginning of the block.
-      return &Emitter.getBlock()->instr_front();
+      MI = &Emitter.getBlock()->instr_front();
     } else {
       // Return first instruction after the pre-existing instructions.
-      return &*std::next(Before);
+      MI = &*std::next(Before);
     }
+
+    if (MI->isCall() && DAG->getTarget().Options.EnableDebugEntryValues)
+      MF.addCallArgsForwardingRegs(MI, DAG->getSDCallSiteInfo(Node));
+
+    return MI;
   };
 
   // If this is the first BB, emit byval parameter dbg_value's.
@@ -903,6 +909,10 @@ EmitSchedule(MachineBasicBlock::iterator &InsertPos) {
       // Remember the source order of the inserted instruction.
       if (HasDbg)
         ProcessSourceNode(N, DAG, Emitter, VRBaseMap, Orders, Seen, NewInsn);
+
+      if (MDNode* MD = DAG->getHeapAllocSite(N))
+        MF.addCodeViewHeapAllocSite(NewInsn, MD);
+
       GluedNodes.pop_back();
     }
     auto NewInsn =
@@ -911,6 +921,8 @@ EmitSchedule(MachineBasicBlock::iterator &InsertPos) {
     if (HasDbg)
       ProcessSourceNode(SU->getNode(), DAG, Emitter, VRBaseMap, Orders, Seen,
                         NewInsn);
+    if (MDNode* MD = DAG->getHeapAllocSite(SU->getNode()))
+      MF.addCodeViewHeapAllocSite(NewInsn, MD);
   }
 
   // Insert all the dbg_values which have not already been inserted in source

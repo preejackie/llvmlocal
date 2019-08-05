@@ -294,8 +294,8 @@ bool ISD::matchUnaryPredicate(SDValue Op,
 bool ISD::matchBinaryPredicate(
     SDValue LHS, SDValue RHS,
     std::function<bool(ConstantSDNode *, ConstantSDNode *)> Match,
-    bool AllowUndefs) {
-  if (LHS.getValueType() != RHS.getValueType())
+    bool AllowUndefs, bool AllowTypeMismatch) {
+  if (!AllowTypeMismatch && LHS.getValueType() != RHS.getValueType())
     return false;
 
   // TODO: Add support for scalar UNDEF cases?
@@ -318,8 +318,8 @@ bool ISD::matchBinaryPredicate(
     auto *RHSCst = dyn_cast<ConstantSDNode>(RHSOp);
     if ((!LHSCst && !LHSUndef) || (!RHSCst && !RHSUndef))
       return false;
-    if (LHSOp.getValueType() != SVT ||
-        LHSOp.getValueType() != RHSOp.getValueType())
+    if (!AllowTypeMismatch && (LHSOp.getValueType() != SVT ||
+                               LHSOp.getValueType() != RHSOp.getValueType()))
       return false;
     if (!Match(LHSCst, RHSCst))
       return false;
@@ -2154,12 +2154,9 @@ SDValue SelectionDAG::GetDemandedBits(SDValue V, const APInt &DemandedBits,
   }
   case ISD::OR:
   case ISD::XOR:
-    // If the LHS or RHS don't contribute bits to the or, drop them.
-    if (MaskedValueIsZero(V.getOperand(0), DemandedBits))
-      return V.getOperand(1);
-    if (MaskedValueIsZero(V.getOperand(1), DemandedBits))
-      return V.getOperand(0);
-    break;
+  case ISD::SIGN_EXTEND_INREG:
+    return TLI->SimplifyMultipleUseDemandedBits(V, DemandedBits, DemandedElts,
+                                                *this, 0);
   case ISD::SRL:
     // Only look at single-use SRLs.
     if (!V.getNode()->hasOneUse())
@@ -2203,15 +2200,6 @@ SDValue SelectionDAG::GetDemandedBits(SDValue V, const APInt &DemandedBits,
       return getNode(ISD::ANY_EXTEND, SDLoc(V), V.getValueType(), DemandedSrc);
     break;
   }
-  case ISD::SIGN_EXTEND_INREG:
-    EVT ExVT = cast<VTSDNode>(V.getOperand(1))->getVT();
-    unsigned ExVTBits = ExVT.getScalarSizeInBits();
-
-    // If none of the extended bits are demanded, eliminate the sextinreg.
-    if (DemandedBits.getActiveBits() <= ExVTBits)
-      return V.getOperand(0);
-
-    break;
   }
   return SDValue();
 }
@@ -2242,6 +2230,12 @@ bool SelectionDAG::MaskedValueIsZero(SDValue V, const APInt &Mask,
                                      const APInt &DemandedElts,
                                      unsigned Depth) const {
   return Mask.isSubsetOf(computeKnownBits(V, DemandedElts, Depth).Zero);
+}
+
+/// MaskedValueIsAllOnes - Return true if '(Op & Mask) == Mask'.
+bool SelectionDAG::MaskedValueIsAllOnes(SDValue V, const APInt &Mask,
+                                        unsigned Depth) const {
+  return Mask.isSubsetOf(computeKnownBits(V, Depth).One);
 }
 
 /// isSplatValue - Return true if the vector V has the same value
@@ -2431,7 +2425,7 @@ KnownBits SelectionDAG::computeKnownBits(SDValue Op, const APInt &DemandedElts,
     return Known;
   }
 
-  if (Depth == 6)
+  if (Depth >= 6)
     return Known;  // Limit search depth.
 
   KnownBits Known2;
@@ -3421,7 +3415,7 @@ unsigned SelectionDAG::ComputeNumSignBits(SDValue Op, const APInt &DemandedElts,
     return Val.getNumSignBits();
   }
 
-  if (Depth == 6)
+  if (Depth >= 6)
     return 1;  // Limit search depth.
 
   if (!DemandedElts)
@@ -3970,7 +3964,7 @@ bool SelectionDAG::isKnownNeverNaN(SDValue Op, bool SNaN, unsigned Depth) const 
   if (getTarget().Options.NoNaNsFPMath || Op->getFlags().hasNoNaNs())
     return true;
 
-  if (Depth == 6)
+  if (Depth >= 6)
     return false; // Limit search depth.
 
   // TODO: Handle vectors.
@@ -5539,6 +5533,12 @@ SDValue SelectionDAG::getNode(unsigned Opcode, const SDLoc &DL, EVT VT,
       // Trivial insertion.
       if (VT.getSimpleVT() == N2.getSimpleValueType())
         return N2;
+
+      // If this is an insert of an extracted vector into an undef vector, we
+      // can just use the input to the extract.
+      if (N1.isUndef() && N2.getOpcode() == ISD::EXTRACT_SUBVECTOR &&
+          N2.getOperand(1) == N3 && N2.getOperand(0).getValueType() == VT)
+        return N2.getOperand(0);
     }
     break;
   }
@@ -5763,6 +5763,7 @@ static SDValue getMemcpyLoadsAndStores(SelectionDAG &DAG, const SDLoc &dl,
                                        MachinePointerInfo DstPtrInfo,
                                        MachinePointerInfo SrcPtrInfo) {
   // Turn a memcpy of undef to nop.
+  // FIXME: We need to honor volatile even is Src is undef.
   if (Src.isUndef())
     return Chain;
 
@@ -5789,13 +5790,12 @@ static SDValue getMemcpyLoadsAndStores(SelectionDAG &DAG, const SDLoc &dl,
   bool isZeroConstant = CopyFromConstant && Slice.Array == nullptr;
   unsigned Limit = AlwaysInline ? ~0U : TLI.getMaxStoresPerMemcpy(OptSize);
 
-  if (!TLI.findOptimalMemOpLowering(MemOps, Limit, Size,
-                                    (DstAlignCanChange ? 0 : Align),
-                                    (isZeroConstant ? 0 : SrcAlign),
-                                    false, false, CopyFromConstant, true,
-                                    DstPtrInfo.getAddrSpace(),
-                                    SrcPtrInfo.getAddrSpace(),
-                                    MF.getFunction().getAttributes()))
+  if (!TLI.findOptimalMemOpLowering(
+          MemOps, Limit, Size, (DstAlignCanChange ? 0 : Align),
+          (isZeroConstant ? 0 : SrcAlign), /*IsMemset=*/false,
+          /*ZeroMemset=*/false, /*MemcpyStrSrc=*/CopyFromConstant,
+          /*AllowOverlap=*/!isVol, DstPtrInfo.getAddrSpace(),
+          SrcPtrInfo.getAddrSpace(), MF.getFunction().getAttributes()))
     return SDValue();
 
   if (DstAlignCanChange) {
@@ -5949,6 +5949,7 @@ static SDValue getMemmoveLoadsAndStores(SelectionDAG &DAG, const SDLoc &dl,
                                         MachinePointerInfo DstPtrInfo,
                                         MachinePointerInfo SrcPtrInfo) {
   // Turn a memmove of undef to nop.
+  // FIXME: We need to honor volatile even is Src is undef.
   if (Src.isUndef())
     return Chain;
 
@@ -5969,13 +5970,15 @@ static SDValue getMemmoveLoadsAndStores(SelectionDAG &DAG, const SDLoc &dl,
   if (Align > SrcAlign)
     SrcAlign = Align;
   unsigned Limit = AlwaysInline ? ~0U : TLI.getMaxStoresPerMemmove(OptSize);
-
-  if (!TLI.findOptimalMemOpLowering(MemOps, Limit, Size,
-                                    (DstAlignCanChange ? 0 : Align), SrcAlign,
-                                    false, false, false, false,
-                                    DstPtrInfo.getAddrSpace(),
-                                    SrcPtrInfo.getAddrSpace(),
-                                    MF.getFunction().getAttributes()))
+  // FIXME: `AllowOverlap` should really be `!isVol` but there is a bug in
+  // findOptimalMemOpLowering. Meanwhile, setting it to `false` produces the
+  // correct code.
+  bool AllowOverlap = false;
+  if (!TLI.findOptimalMemOpLowering(
+          MemOps, Limit, Size, (DstAlignCanChange ? 0 : Align), SrcAlign,
+          /*IsMemset=*/false, /*ZeroMemset=*/false, /*MemcpyStrSrc=*/false,
+          AllowOverlap, DstPtrInfo.getAddrSpace(), SrcPtrInfo.getAddrSpace(),
+          MF.getFunction().getAttributes()))
     return SDValue();
 
   if (DstAlignCanChange) {
@@ -6054,6 +6057,7 @@ static SDValue getMemsetStores(SelectionDAG &DAG, const SDLoc &dl,
                                uint64_t Size, unsigned Align, bool isVol,
                                MachinePointerInfo DstPtrInfo) {
   // Turn a memset of undef to nop.
+  // FIXME: We need to honor volatile even is Src is undef.
   if (Src.isUndef())
     return Chain;
 
@@ -6070,11 +6074,12 @@ static SDValue getMemsetStores(SelectionDAG &DAG, const SDLoc &dl,
     DstAlignCanChange = true;
   bool IsZeroVal =
     isa<ConstantSDNode>(Src) && cast<ConstantSDNode>(Src)->isNullValue();
-  if (!TLI.findOptimalMemOpLowering(MemOps, TLI.getMaxStoresPerMemset(OptSize),
-                                    Size, (DstAlignCanChange ? 0 : Align), 0,
-                                    true, IsZeroVal, false, true,
-                                    DstPtrInfo.getAddrSpace(), ~0u,
-                                    MF.getFunction().getAttributes()))
+  if (!TLI.findOptimalMemOpLowering(
+          MemOps, TLI.getMaxStoresPerMemset(OptSize), Size,
+          (DstAlignCanChange ? 0 : Align), 0, /*IsMemset=*/true,
+          /*ZeroMemset=*/IsZeroVal, /*MemcpyStrSrc=*/false,
+          /*AllowOverlap=*/!isVol, DstPtrInfo.getAddrSpace(), ~0u,
+          MF.getFunction().getAttributes()))
     return SDValue();
 
   if (DstAlignCanChange) {
@@ -6550,7 +6555,7 @@ SDValue SelectionDAG::getMergeValues(ArrayRef<SDValue> Ops, const SDLoc &dl) {
 SDValue SelectionDAG::getMemIntrinsicNode(
     unsigned Opcode, const SDLoc &dl, SDVTList VTList, ArrayRef<SDValue> Ops,
     EVT MemVT, MachinePointerInfo PtrInfo, unsigned Align,
-    MachineMemOperand::Flags Flags, unsigned Size) {
+    MachineMemOperand::Flags Flags, unsigned Size, const AAMDNodes &AAInfo) {
   if (Align == 0)  // Ensure that codegen never sees alignment 0
     Align = getEVTAlignment(MemVT);
 
@@ -6559,7 +6564,7 @@ SDValue SelectionDAG::getMemIntrinsicNode(
 
   MachineFunction &MF = getMachineFunction();
   MachineMemOperand *MMO =
-    MF.getMachineMemOperand(PtrInfo, Flags, Size, Align);
+      MF.getMachineMemOperand(PtrInfo, Flags, Size, Align, AAInfo);
 
   return getMemIntrinsicNode(Opcode, dl, VTList, Ops, MemVT, MMO);
 }
@@ -6953,7 +6958,7 @@ SDValue SelectionDAG::getMaskedLoad(EVT VT, const SDLoc &dl, SDValue Chain,
   SDValue Ops[] = { Chain, Ptr, Mask, PassThru };
   FoldingSetNodeID ID;
   AddNodeIDNode(ID, ISD::MLOAD, VTs, Ops);
-  ID.AddInteger(VT.getRawBits());
+  ID.AddInteger(MemVT.getRawBits());
   ID.AddInteger(getSyntheticNodeSubclassData<MaskedLoadSDNode>(
       dl.getIROrder(), VTs, ExtTy, isExpanding, MemVT, MMO));
   ID.AddInteger(MMO->getPointerInfo().getAddrSpace());
@@ -6979,12 +6984,11 @@ SDValue SelectionDAG::getMaskedStore(SDValue Chain, const SDLoc &dl,
                                      bool IsTruncating, bool IsCompressing) {
   assert(Chain.getValueType() == MVT::Other &&
         "Invalid chain type");
-  EVT VT = Val.getValueType();
   SDVTList VTs = getVTList(MVT::Other);
   SDValue Ops[] = { Chain, Val, Ptr, Mask };
   FoldingSetNodeID ID;
   AddNodeIDNode(ID, ISD::MSTORE, VTs, Ops);
-  ID.AddInteger(VT.getRawBits());
+  ID.AddInteger(MemVT.getRawBits());
   ID.AddInteger(getSyntheticNodeSubclassData<MaskedStoreSDNode>(
       dl.getIROrder(), VTs, IsTruncating, IsCompressing, MemVT, MMO));
   ID.AddInteger(MMO->getPointerInfo().getAddrSpace());
@@ -8603,7 +8607,7 @@ SDValue SelectionDAG::makeEquivalentMemoryOrdering(LoadSDNode *OldLoad,
   // TokenFactor.
   SDValue OldChain = SDValue(OldLoad, 1);
   SDValue NewChain = SDValue(NewMemOp.getNode(), 1);
-  if (!OldLoad->hasAnyUseOfValue(1))
+  if (OldChain == NewChain || !OldLoad->hasAnyUseOfValue(1))
     return NewChain;
 
   SDValue TokenFactor =
@@ -8989,7 +8993,8 @@ void SDNode::intersectFlagsWith(const SDNodeFlags Flags) {
 
 SDValue
 SelectionDAG::matchBinOpReduction(SDNode *Extract, ISD::NodeType &BinOp,
-                                  ArrayRef<ISD::NodeType> CandidateBinOps) {
+                                  ArrayRef<ISD::NodeType> CandidateBinOps,
+                                  bool AllowPartials) {
   // The pattern must end in an extract from index 0.
   if (Extract->getOpcode() != ISD::EXTRACT_VECTOR_ELT ||
       !isNullConstant(Extract->getOperand(1)))
@@ -9003,6 +9008,23 @@ SelectionDAG::matchBinOpReduction(SDNode *Extract, ISD::NodeType &BinOp,
         return Op.getOpcode() == unsigned(BinOp);
       }))
     return SDValue();
+  unsigned CandidateBinOp = Op.getOpcode();
+
+  // Matching failed - attempt to see if we did enough stages that a partial
+  // reduction from a subvector is possible.
+  auto PartialReduction = [&](SDValue Op, unsigned NumSubElts) {
+    if (!AllowPartials || !Op)
+      return SDValue();
+    EVT OpVT = Op.getValueType();
+    EVT OpSVT = OpVT.getScalarType();
+    EVT SubVT = EVT::getVectorVT(*getContext(), OpSVT, NumSubElts);
+    if (!TLI->isExtractSubvectorCheap(SubVT, OpVT, 0))
+      return SDValue();
+    BinOp = (ISD::NodeType)CandidateBinOp;
+    return getNode(
+        ISD::EXTRACT_SUBVECTOR, SDLoc(Op), SubVT, Op,
+        getConstant(0, SDLoc(Op), TLI->getVectorIdxTy(getDataLayout())));
+  };
 
   // At each stage, we're looking for something that looks like:
   // %s = shufflevector <8 x i32> %op, <8 x i32> undef,
@@ -9014,10 +9036,15 @@ SelectionDAG::matchBinOpReduction(SDNode *Extract, ISD::NodeType &BinOp,
   // <4,5,6,7,u,u,u,u>
   // <2,3,u,u,u,u,u,u>
   // <1,u,u,u,u,u,u,u>
-  unsigned CandidateBinOp = Op.getOpcode();
+  // While a partial reduction match would be:
+  // <2,3,u,u,u,u,u,u>
+  // <1,u,u,u,u,u,u,u>
+  SDValue PrevOp;
   for (unsigned i = 0; i < Stages; ++i) {
+    unsigned MaskEnd = (1 << i);
+
     if (Op.getOpcode() != CandidateBinOp)
-      return SDValue();
+      return PartialReduction(PrevOp, MaskEnd);
 
     SDValue Op0 = Op.getOperand(0);
     SDValue Op1 = Op.getOperand(1);
@@ -9033,12 +9060,14 @@ SelectionDAG::matchBinOpReduction(SDNode *Extract, ISD::NodeType &BinOp,
     // The first operand of the shuffle should be the same as the other operand
     // of the binop.
     if (!Shuffle || Shuffle->getOperand(0) != Op)
-      return SDValue();
+      return PartialReduction(PrevOp, MaskEnd);
 
     // Verify the shuffle has the expected (at this stage of the pyramid) mask.
-    for (int Index = 0, MaskEnd = 1 << i; Index < MaskEnd; ++Index)
-      if (Shuffle->getMaskElt(Index) != MaskEnd + Index)
-        return SDValue();
+    for (int Index = 0; Index < (int)MaskEnd; ++Index)
+      if (Shuffle->getMaskElt(Index) != (int)(MaskEnd + Index))
+        return PartialReduction(PrevOp, MaskEnd);
+
+    PrevOp = Op;
   }
 
   BinOp = (ISD::NodeType)CandidateBinOp;

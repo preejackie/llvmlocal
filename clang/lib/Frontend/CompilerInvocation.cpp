@@ -467,6 +467,10 @@ static void parseAnalyzerConfigs(AnalyzerOptions &AnOpts,
   if (!Diags)
     return;
 
+  if (AnOpts.ShouldTrackConditionsDebug && !AnOpts.ShouldTrackConditions)
+    Diags->Report(diag::err_analyzer_config_invalid_input)
+        << "track-conditions-debug" << "'track-conditions' to also be enabled";
+
   if (!AnOpts.CTUDir.empty() && !llvm::sys::fs::is_directory(AnOpts.CTUDir))
     Diags->Report(diag::err_analyzer_config_invalid_input) << "ctu-dir"
                                                            << "a filename";
@@ -727,24 +731,8 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
   Opts.WholeProgramVTables = Args.hasArg(OPT_fwhole_program_vtables);
   Opts.LTOVisibilityPublicStd = Args.hasArg(OPT_flto_visibility_public_std);
   Opts.SplitDwarfFile = Args.getLastArgValue(OPT_split_dwarf_file);
+  Opts.SplitDwarfOutput = Args.getLastArgValue(OPT_split_dwarf_output);
   Opts.SplitDwarfInlining = !Args.hasArg(OPT_fno_split_dwarf_inlining);
-
-  if (Arg *A =
-          Args.getLastArg(OPT_enable_split_dwarf, OPT_enable_split_dwarf_EQ)) {
-    if (A->getOption().matches(options::OPT_enable_split_dwarf)) {
-      Opts.setSplitDwarfMode(CodeGenOptions::SplitFileFission);
-    } else {
-      StringRef Name = A->getValue();
-      if (Name == "single")
-        Opts.setSplitDwarfMode(CodeGenOptions::SingleFileFission);
-      else if (Name == "split")
-        Opts.setSplitDwarfMode(CodeGenOptions::SplitFileFission);
-      else
-        Diags.Report(diag::err_drv_invalid_value)
-            << A->getAsString(Args) << Name;
-    }
-  }
-
   Opts.DebugTypeExtRefs = Args.hasArg(OPT_dwarf_ext_refs);
   Opts.DebugExplicitImport = Args.hasArg(OPT_dwarf_explicit_import);
   Opts.DebugFwdTemplateParams = Args.hasArg(OPT_debug_forward_template_params);
@@ -759,6 +747,13 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
 
   Opts.DisableLLVMPasses = Args.hasArg(OPT_disable_llvm_passes);
   Opts.DisableLifetimeMarkers = Args.hasArg(OPT_disable_lifetimemarkers);
+
+  llvm::Triple T(TargetOpts.Triple);
+  llvm::Triple::ArchType Arch = T.getArch();
+  if (Opts.OptimizationLevel > 0 &&
+      (Arch == llvm::Triple::x86 || Arch == llvm::Triple::x86_64))
+    Opts.EnableDebugEntryValues = Args.hasArg(OPT_femit_debug_entry_values);
+
   Opts.DisableO0ImplyOptNone = Args.hasArg(OPT_disable_O0_optnone);
   Opts.DisableRedZone = Args.hasArg(OPT_disable_red_zone);
   Opts.IndirectTlsSegRefs = Args.hasArg(OPT_mno_tls_direct_seg_refs);
@@ -828,8 +823,32 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
   Opts.CXXCtorDtorAliases = Args.hasArg(OPT_mconstructor_aliases);
   Opts.CodeModel = TargetOpts.CodeModel;
   Opts.DebugPass = Args.getLastArgValue(OPT_mdebug_pass);
-  Opts.DisableFPElim =
-      (Args.hasArg(OPT_mdisable_fp_elim) || Args.hasArg(OPT_pg));
+
+  // Handle -mframe-pointer option.
+  if (Arg *A = Args.getLastArg(OPT_mframe_pointer_EQ)) {
+    CodeGenOptions::FramePointerKind FP;
+    StringRef Name = A->getValue();
+    bool ValidFP = true;
+    if (Name == "none")
+      FP = CodeGenOptions::FramePointerKind::None;
+    else if (Name == "non-leaf")
+      FP = CodeGenOptions::FramePointerKind::NonLeaf;
+    else if (Name == "all")
+      FP = CodeGenOptions::FramePointerKind::All;
+    else {
+      Diags.Report(diag::err_drv_invalid_value) << A->getAsString(Args) << Name;
+      Success = false;
+      ValidFP = false;
+    }
+    if (ValidFP)
+      Opts.setFramePointer(FP);
+  }
+
+  // -pg may override -mframe-pointer
+  // TODO: This should be merged into getFramePointerKind in Clang.cpp.
+  if (Args.hasArg(OPT_pg))
+    Opts.setFramePointer(CodeGenOptions::FramePointerKind::All);
+
   Opts.DisableFree = Args.hasArg(OPT_disable_free);
   Opts.DiscardValueNames = Args.hasArg(OPT_discard_value_names);
   Opts.DisableTailCalls = Args.hasArg(OPT_mdisable_tail_calls);
@@ -876,7 +895,6 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
   Opts.PIECopyRelocations =
       Args.hasArg(OPT_mpie_copy_relocations);
   Opts.NoPLT = Args.hasArg(OPT_fno_plt);
-  Opts.OmitLeafFramePointer = Args.hasArg(OPT_momit_leaf_frame_pointer);
   Opts.SaveTempLabels = Args.hasArg(OPT_msave_temp_labels);
   Opts.NoDwarfDirectoryAsm = Args.hasArg(OPT_fno_dwarf_directory_asm);
   Opts.SoftFloat = Args.hasArg(OPT_msoft_float);
@@ -1233,6 +1251,11 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
 
   if (Arg *A = Args.getLastArg(OPT_opt_record_passes)) {
     Opts.OptRecordPasses = A->getValue();
+    NeedLocTracking = true;
+  }
+
+  if (Arg *A = Args.getLastArg(OPT_opt_record_format)) {
+    Opts.OptRecordFormat = A->getValue();
     NeedLocTracking = true;
   }
 
@@ -1675,6 +1698,25 @@ static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
       Opts.ProgramAction = frontend::GenerateHeaderModule; break;
     case OPT_emit_pch:
       Opts.ProgramAction = frontend::GeneratePCH; break;
+    case OPT_emit_iterface_stubs: {
+      llvm::Optional<frontend::ActionKind> ProgramAction =
+          llvm::StringSwitch<llvm::Optional<frontend::ActionKind>>(
+              Args.hasArg(OPT_iterface_stub_version_EQ)
+                  ? Args.getLastArgValue(OPT_iterface_stub_version_EQ)
+                  : "")
+              .Case("experimental-yaml-elf-v1",
+                    frontend::GenerateInterfaceYAMLExpV1)
+              .Case("experimental-tapi-elf-v1",
+                    frontend::GenerateInterfaceTBEExpV1)
+              .Default(llvm::None);
+      if (!ProgramAction)
+        Diags.Report(diag::err_drv_invalid_value)
+            << "Must specify a valid interface stub format type using "
+            << "-interface-stub-version=<experimental-tapi-elf-v1 | "
+               "experimental-yaml-elf-v1>";
+      Opts.ProgramAction = *ProgramAction;
+      break;
+    }
     case OPT_init_only:
       Opts.ProgramAction = frontend::InitOnly; break;
     case OPT_fsyntax_only:
@@ -1752,8 +1794,10 @@ static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
   Opts.ShowHelp = Args.hasArg(OPT_help);
   Opts.ShowStats = Args.hasArg(OPT_print_stats);
   Opts.ShowTimers = Args.hasArg(OPT_ftime_report);
-  Opts.PrintSupportedCPUs = Args.hasArg(OPT__print_supported_cpus);
+  Opts.PrintSupportedCPUs = Args.hasArg(OPT_print_supported_cpus);
   Opts.TimeTrace = Args.hasArg(OPT_ftime_trace);
+  Opts.TimeTraceGranularity = getLastArgIntValue(
+      Args, OPT_ftime_trace_granularity_EQ, Opts.TimeTraceGranularity, Diags);
   Opts.ShowVersion = Args.hasArg(OPT_version);
   Opts.ASTMergeFiles = Args.getAllArgValues(OPT_ast_merge);
   Opts.LLVMArgs = Args.getAllArgValues(OPT_mllvm);
@@ -2188,9 +2232,15 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
     Opts.NativeHalfType = 1;
     Opts.NativeHalfArgsAndReturns = 1;
     Opts.OpenCLCPlusPlus = Opts.CPlusPlus;
+
     // Include default header file for OpenCL.
-    if (Opts.IncludeDefaultHeader && !Opts.DeclareOpenCLBuiltins) {
-      PPOpts.Includes.push_back("opencl-c.h");
+    if (Opts.IncludeDefaultHeader) {
+      if (Opts.DeclareOpenCLBuiltins) {
+        // Only include base header file for builtin types and constants.
+        PPOpts.Includes.push_back("opencl-c-base.h");
+      } else {
+        PPOpts.Includes.push_back("opencl-c.h");
+      }
     }
   }
 
@@ -2383,7 +2433,7 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
         .Cases("cl1.1", "CL1.1", LangStandard::lang_opencl11)
         .Cases("cl1.2", "CL1.2", LangStandard::lang_opencl12)
         .Cases("cl2.0", "CL2.0", LangStandard::lang_opencl20)
-        .Case("c++", LangStandard::lang_openclcpp)
+        .Cases("clc++", "CLC++", LangStandard::lang_openclcpp)
         .Default(LangStandard::lang_unspecified);
 
     if (OpenCLLangStd == LangStandard::lang_unspecified) {
@@ -2717,6 +2767,10 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   Opts.PackStruct = getLastArgIntValue(Args, OPT_fpack_struct_EQ, 0, Diags);
   Opts.MaxTypeAlign = getLastArgIntValue(Args, OPT_fmax_type_align_EQ, 0, Diags);
   Opts.AlignDouble = Args.hasArg(OPT_malign_double);
+  Opts.LongDoubleSize = Args.hasArg(OPT_mlong_double_128)
+                            ? 128
+                            : Args.hasArg(OPT_mlong_double_64) ? 64 : 0;
+  Opts.PPCIEEELongDouble = Args.hasArg(OPT_mabi_EQ_ieeelongdouble);
   Opts.PICLevel = getLastArgIntValue(Args, OPT_pic_level, 0, Diags);
   Opts.ROPI = Args.hasArg(OPT_fropi);
   Opts.RWPI = Args.hasArg(OPT_frwpi);
@@ -3107,6 +3161,8 @@ static bool isStrictlyPreprocessorAction(frontend::ActionKind Action) {
   case frontend::GenerateModuleInterface:
   case frontend::GenerateHeaderModule:
   case frontend::GeneratePCH:
+  case frontend::GenerateInterfaceYAMLExpV1:
+  case frontend::GenerateInterfaceTBEExpV1:
   case frontend::ParseSyntaxOnly:
   case frontend::ModuleFileInfo:
   case frontend::VerifyPCH:

@@ -56,8 +56,6 @@ struct ELFNote {
 /// the ObjectFile protocol.
 class ObjectFileELF : public lldb_private::ObjectFile {
 public:
-  ~ObjectFileELF() override;
-
   // Static Functions
   static void Initialize();
 
@@ -90,6 +88,13 @@ public:
   lldb_private::ConstString GetPluginName() override;
 
   uint32_t GetPluginVersion() override;
+
+  // LLVM RTTI support
+  static char ID;
+  bool isA(const void *ClassID) const override {
+    return ClassID == &ID || ObjectFile::isA(ClassID);
+  }
+  static bool classof(const ObjectFile *obj) { return obj->isA(&ID); }
 
   // ObjectFile Protocol.
   bool ParseHeader() override;
@@ -190,7 +195,7 @@ private:
 
   /// ELF .gnu_debuglink file and crc data if available.
   std::string m_gnu_debuglink_file;
-  uint32_t m_gnu_debuglink_crc;
+  uint32_t m_gnu_debuglink_crc = 0;
 
   /// Collection of program headers.
   ProgramHeaderColl m_program_headers;

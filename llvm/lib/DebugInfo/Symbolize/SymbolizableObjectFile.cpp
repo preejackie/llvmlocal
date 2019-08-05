@@ -42,7 +42,7 @@ getDILineInfoSpecifier(FunctionNameKind FNKind) {
 }
 
 ErrorOr<std::unique_ptr<SymbolizableObjectFile>>
-SymbolizableObjectFile::create(object::ObjectFile *Obj,
+SymbolizableObjectFile::create(const object::ObjectFile *Obj,
                                std::unique_ptr<DIContext> DICtx) {
   assert(DICtx);
   std::unique_ptr<SymbolizableObjectFile> res(
@@ -102,7 +102,7 @@ SymbolizableObjectFile::create(object::ObjectFile *Obj,
   return std::move(res);
 }
 
-SymbolizableObjectFile::SymbolizableObjectFile(ObjectFile *Obj,
+SymbolizableObjectFile::SymbolizableObjectFile(const ObjectFile *Obj,
                                                std::unique_ptr<DIContext> DICtx)
     : Module(Obj), DebugInfoContext(std::move(DICtx)) {}
 
@@ -296,6 +296,14 @@ DIGlobal SymbolizableObjectFile::symbolizeData(
   getNameFromSymbolTable(SymbolRef::ST_Data, ModuleOffset.Address, Res.Name,
                          Res.Start, Res.Size);
   return Res;
+}
+
+std::vector<DILocal> SymbolizableObjectFile::symbolizeFrame(
+    object::SectionedAddress ModuleOffset) const {
+  if (ModuleOffset.SectionIndex == object::SectionedAddress::UndefSection)
+    ModuleOffset.SectionIndex =
+        getModuleSectionIndexForAddress(ModuleOffset.Address);
+  return DebugInfoContext->getLocalsForAddress(ModuleOffset);
 }
 
 /// Search for the first occurence of specified Address in ObjectFile.

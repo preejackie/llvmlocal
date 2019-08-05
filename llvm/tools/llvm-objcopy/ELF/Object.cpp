@@ -597,6 +597,11 @@ static bool isValidReservedSectionIndex(uint16_t Index, uint16_t Machine) {
   case SHN_COMMON:
     return true;
   }
+
+  if (Machine == EM_AMDGPU) {
+    return Index == SHN_AMDGPU_LDS;
+  }
+
   if (Machine == EM_HEXAGON) {
     switch (Index) {
     case SHN_HEXAGON_SCOMMON:
@@ -618,21 +623,17 @@ uint16_t Symbol::getShndx() const {
       return SHN_XINDEX;
     return DefinedIn->Index;
   }
-  switch (ShndxType) {
-  // This means that we don't have a defined section but we do need to
-  // output a legitimate section index.
-  case SYMBOL_SIMPLE_INDEX:
+
+  if (ShndxType == SYMBOL_SIMPLE_INDEX) {
+    // This means that we don't have a defined section but we do need to
+    // output a legitimate section index.
     return SHN_UNDEF;
-  case SYMBOL_ABS:
-  case SYMBOL_COMMON:
-  case SYMBOL_HEXAGON_SCOMMON:
-  case SYMBOL_HEXAGON_SCOMMON_2:
-  case SYMBOL_HEXAGON_SCOMMON_4:
-  case SYMBOL_HEXAGON_SCOMMON_8:
-  case SYMBOL_XINDEX:
-    return static_cast<uint16_t>(ShndxType);
   }
-  llvm_unreachable("Symbol with invalid ShndxType encountered");
+
+  assert(ShndxType == SYMBOL_ABS || ShndxType == SYMBOL_COMMON ||
+         (ShndxType >= SYMBOL_LOPROC && ShndxType <= SYMBOL_HIPROC) ||
+         (ShndxType >= SYMBOL_LOOS && ShndxType <= SYMBOL_HIOS));
+  return static_cast<uint16_t>(ShndxType);
 }
 
 bool Symbol::isCommon() const { return getShndx() == SHN_COMMON; }
@@ -1994,6 +1995,25 @@ template <class ELFT> Error ELFWriter<ELFT>::write() {
   return Buf.commit();
 }
 
+static Error removeUnneededSections(Object &Obj) {
+  // We can remove an empty symbol table from non-relocatable objects.
+  // Relocatable objects typically have relocation sections whose
+  // sh_link field points to .symtab, so we can't remove .symtab
+  // even if it is empty.
+  if (Obj.isRelocatable() || Obj.SymbolTable == nullptr ||
+      !Obj.SymbolTable->empty())
+    return Error::success();
+
+  // .strtab can be used for section names. In such a case we shouldn't
+  // remove it.
+  auto *StrTab = Obj.SymbolTable->getStrTab() == Obj.SectionNames
+                     ? nullptr
+                     : Obj.SymbolTable->getStrTab();
+  return Obj.removeSections(false, [&](const SectionBase &Sec) {
+    return &Sec == Obj.SymbolTable || &Sec == StrTab;
+  });
+}
+
 template <class ELFT> Error ELFWriter<ELFT>::finalize() {
   // It could happen that SectionNames has been removed and yet the user wants
   // a section header table output. We need to throw an error if a user tries
@@ -2003,6 +2023,8 @@ template <class ELFT> Error ELFWriter<ELFT>::finalize() {
                              "cannot write section header table because "
                              "section header string table was removed");
 
+  if (Error E = removeUnneededSections(Obj))
+    return E;
   Obj.sortSections();
 
   // We need to assign indexes before we perform layout because we need to know

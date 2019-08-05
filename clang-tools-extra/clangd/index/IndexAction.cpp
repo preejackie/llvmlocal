@@ -7,10 +7,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "IndexAction.h"
+#include "Headers.h"
+#include "Logger.h"
+#include "index/Relation.h"
 #include "index/SymbolOrigin.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Index/IndexingAction.h"
 #include "clang/Tooling/Tooling.h"
+#include <utility>
 
 namespace clang {
 namespace clangd {
@@ -64,7 +68,8 @@ public:
     }
     if (auto Digest = digestFile(SM, FileID))
       Node.Digest = std::move(*Digest);
-    Node.IsTU = FileID == SM.getMainFileID();
+    if (FileID == SM.getMainFileID())
+      Node.Flags |= IncludeGraphNode::SourceFlag::IsTU;
     Node.URI = I->getKey();
   }
 
@@ -128,6 +133,7 @@ public:
   std::unique_ptr<ASTConsumer>
   CreateASTConsumer(CompilerInstance &CI, llvm::StringRef InFile) override {
     CI.getPreprocessor().addCommentHandler(PragmaHandler.get());
+    addSystemHeadersMapping(Includes.get(), CI.getLangOpts());
     if (IncludeGraphCallback != nullptr)
       CI.getPreprocessor().addPPCallbacks(
           llvm::make_unique<IncludeGraphCollector>(CI.getSourceManager(), IG));
@@ -148,12 +154,6 @@ public:
   void EndSourceFileAction() override {
     WrapperFrontendAction::EndSourceFileAction();
 
-    const auto &CI = getCompilerInstance();
-    if (CI.hasDiagnostics() &&
-        CI.getDiagnostics().hasUncompilableErrorOccurred()) {
-      llvm::errs() << "Skipping TU due to uncompilable errors\n";
-      return;
-    }
     SymbolsCallback(Collector->takeSymbols());
     if (RefsCallback != nullptr)
       RefsCallback(Collector->takeRefs());
@@ -200,7 +200,6 @@ std::unique_ptr<FrontendAction> createStaticIndexingAction(
     Opts.RefsInHeaders = true;
   }
   auto Includes = llvm::make_unique<CanonicalIncludes>();
-  addSystemHeadersMapping(Includes.get());
   Opts.Includes = Includes.get();
   return llvm::make_unique<IndexAction>(
       std::make_shared<SymbolCollector>(std::move(Opts)), std::move(Includes),

@@ -10,7 +10,9 @@
 
 #include "llvm/ADT/Triple.h"
 #include "llvm/ExecutionEngine/Orc/OrcABISupport.h"
+#include "llvm/Support/raw_ostream.h"
 
+#include <chrono>
 #define DEBUG_TYPE "orc"
 
 namespace llvm {
@@ -41,7 +43,7 @@ JITTargetAddress
 LazyCallThroughManager::callThroughToSymbol(JITTargetAddress TrampolineAddr) {
   JITDylib *SourceJD = nullptr;
   SymbolStringPtr SymbolName;
-
+    auto st_time = std::chrono::high_resolution_clock::now();
   {
     std::lock_guard<std::mutex> Lock(LCTMMutex);
     auto I = Reexports.find(TrampolineAddr);
@@ -50,7 +52,6 @@ LazyCallThroughManager::callThroughToSymbol(JITTargetAddress TrampolineAddr) {
     SourceJD = I->second.first;
     SymbolName = I->second.second;
   }
-
   auto LookupResult =
       ES.lookup(JITDylibSearchList({{SourceJD, true}}), SymbolName);
 
@@ -60,6 +61,12 @@ LazyCallThroughManager::callThroughToSymbol(JITTargetAddress TrampolineAddr) {
   }
 
   auto ResolvedAddr = LookupResult->getAddress();
+  auto et_time = std::chrono::high_resolution_clock::now();
+  auto latency =
+      std::chrono::duration_cast<std::chrono::microseconds>(et_time - st_time);
+
+  llvm::errs() << "\n CallThrough Lookup for : " << SymbolName
+               << " : " << latency.count();
 
   std::shared_ptr<NotifyResolvedFunction> NotifyResolved = nullptr;
   {
@@ -121,7 +128,8 @@ createLocalLazyCallThroughManager(const Triple &T, ExecutionSession &ES,
 
 LazyReexportsMaterializationUnit::LazyReexportsMaterializationUnit(
     LazyCallThroughManager &LCTManager, IndirectStubsManager &ISManager,
-    JITDylib &SourceJD, SymbolAliasMap CallableAliases, VModuleKey K)
+    JITDylib &SourceJD, SymbolAliasMap CallableAliases, ImplSymbolMap *SrcJDLoc,
+    VModuleKey K)
     : MaterializationUnit(extractFlags(CallableAliases), std::move(K)),
       LCTManager(LCTManager), ISManager(ISManager), SourceJD(SourceJD),
       CallableAliases(std::move(CallableAliases)),
@@ -129,7 +137,8 @@ LazyReexportsMaterializationUnit::LazyReexportsMaterializationUnit(
           [&ISManager](JITDylib &JD, const SymbolStringPtr &SymbolName,
                        JITTargetAddress ResolvedAddr) {
             return ISManager.updatePointer(*SymbolName, ResolvedAddr);
-          })) {}
+          })),
+      AliaseeTable(SrcJDLoc) {}
 
 StringRef LazyReexportsMaterializationUnit::getName() const {
   return "<Lazy Reexports>";
@@ -149,7 +158,7 @@ void LazyReexportsMaterializationUnit::materialize(
 
   if (!CallableAliases.empty())
     R.replace(lazyReexports(LCTManager, ISManager, SourceJD,
-                            std::move(CallableAliases)));
+                            std::move(CallableAliases), AliaseeTable));
 
   IndirectStubsManager::StubInitsMap StubInits;
   for (auto &Alias : RequestedAliases) {
@@ -167,6 +176,9 @@ void LazyReexportsMaterializationUnit::materialize(
     StubInits[*Alias.first] =
         std::make_pair(*CallThroughTrampoline, Alias.second.AliasFlags);
   }
+
+  if (AliaseeTable != nullptr && !RequestedAliases.empty())
+    AliaseeTable->trackImpls(RequestedAliases, &SourceJD);
 
   if (auto Err = ISManager.createStubs(StubInits)) {
     SourceJD.getExecutionSession().reportError(std::move(Err));

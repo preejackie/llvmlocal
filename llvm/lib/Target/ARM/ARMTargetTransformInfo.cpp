@@ -37,7 +37,7 @@ using namespace llvm;
 #define DEBUG_TYPE "armtti"
 
 static cl::opt<bool> DisableLowOverheadLoops(
-  "disable-arm-loloops", cl::Hidden, cl::init(true),
+  "disable-arm-loloops", cl::Hidden, cl::init(false),
   cl::desc("Disable the generation of low-overhead loops"));
 
 bool ARMTTIImpl::areInlineCompatible(const Function *Caller,
@@ -696,14 +696,10 @@ bool ARMTTIImpl::isLoweredToCall(const Function *F) {
 bool ARMTTIImpl::isHardwareLoopProfitable(Loop *L, ScalarEvolution &SE,
                                           AssumptionCache &AC,
                                           TargetLibraryInfo *LibInfo,
-                                          TTI::HardwareLoopInfo &HWLoopInfo) {
+                                          HardwareLoopInfo &HWLoopInfo) {
   // Low-overhead branches are only supported in the 'low-overhead branch'
   // extension of v8.1-m.
   if (!ST->hasLOB() || DisableLowOverheadLoops)
-    return false;
-
-  // For now, for simplicity, only support loops with one exit block.
-  if (!L->getExitBlock())
     return false;
 
   if (!SE.hasLoopInvariantBackedgeTakenCount(L))
@@ -810,6 +806,7 @@ bool ARMTTIImpl::isHardwareLoopProfitable(Loop *L, ScalarEvolution &SE,
       default:
         break;
       case Intrinsic::set_loop_iterations:
+      case Intrinsic::test_set_loop_iterations:
       case Intrinsic::loop_decrement:
       case Intrinsic::loop_decrement_reg:
         return true;
@@ -845,6 +842,7 @@ bool ARMTTIImpl::isHardwareLoopProfitable(Loop *L, ScalarEvolution &SE,
   LLVMContext &C = L->getHeader()->getContext();
   HWLoopInfo.CounterInReg = true;
   HWLoopInfo.IsNestingLegal = false;
+  HWLoopInfo.PerformEntryTest = true;
   HWLoopInfo.CountType = Type::getInt32Ty(C);
   HWLoopInfo.LoopDecrement = ConstantInt::get(HWLoopInfo.CountType, 1);
   return true;

@@ -57,7 +57,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Instrumentation.h"
 #include <cerrno>
-
+#include <chrono>
 #ifdef __CYGWIN__
 #include <cygwin/version.h>
 #if defined(CYGWIN_VERSION_DLL_MAJOR) && CYGWIN_VERSION_DLL_MAJOR<1007
@@ -83,18 +83,15 @@ namespace {
                                  cl::desc("Force interpretation: disable JIT"),
                                  cl::init(false));
 
-  cl::opt<JITKind> UseJITKind("jit-kind",
-                              cl::desc("Choose underlying JIT kind."),
-                              cl::init(JITKind::MCJIT),
-                              cl::values(
-                                clEnumValN(JITKind::MCJIT, "mcjit",
-                                           "MCJIT"),
-                                clEnumValN(JITKind::OrcMCJITReplacement,
-                                           "orc-mcjit",
-                                           "Orc-based MCJIT replacement"),
-                                clEnumValN(JITKind::OrcLazy,
-                                           "orc-lazy",
-                                           "Orc-based lazy JIT.")));
+  cl::opt<JITKind> UseJITKind(
+      "jit-kind", cl::desc("Choose underlying JIT kind."),
+      cl::init(JITKind::MCJIT),
+      cl::values(clEnumValN(JITKind::MCJIT, "mcjit", "MCJIT"),
+                 clEnumValN(JITKind::OrcMCJITReplacement, "orc-mcjit",
+                            "Orc-based MCJIT replacement "
+                            "(deprecated)"),
+                 clEnumValN(JITKind::OrcLazy, "orc-lazy",
+                            "Orc-based lazy JIT.")));
 
   cl::opt<unsigned>
   LazyJITCompileThreads("compile-threads",
@@ -419,7 +416,8 @@ int main(int argc, char **argv, char * const *envp) {
   builder.setEngineKind(ForceInterpreter
                         ? EngineKind::Interpreter
                         : EngineKind::JIT);
-  builder.setUseOrcMCJITReplacement(UseJITKind == JITKind::OrcMCJITReplacement);
+  builder.setUseOrcMCJITReplacement(AcknowledgeORCv1Deprecation,
+                                    UseJITKind == JITKind::OrcMCJITReplacement);
 
   // If we are supposed to override the target triple, do so now.
   if (!TargetTriple.empty())
@@ -665,6 +663,7 @@ int main(int argc, char **argv, char * const *envp) {
     // Forward MCJIT's symbol resolution calls to the remote.
     static_cast<ForwardingMemoryManager *>(RTDyldMM)->setResolver(
         orc::createLambdaResolver(
+            AcknowledgeORCv1Deprecation,
             [](const std::string &Name) { return nullptr; },
             [&](const std::string &Name) {
               if (auto Addr = ExitOnErr(R->getSymbolAddress(Name)))
@@ -866,7 +865,7 @@ int runOrcLazyJIT(const char *ProgName) {
       reinterpret_cast<EntryPointPtr>(static_cast<uintptr_t>(EntryPointSym.getAddress()));
     AltEntryThreads.push_back(std::thread([EntryPoint]() { EntryPoint(); }));
   }
-
+     auto st_time = std::chrono::high_resolution_clock::now();
   // Run main.
   auto MainSym = ExitOnErr(J->lookup("main"));
   typedef int (*MainFnPtr)(int, const char *[]);
@@ -887,7 +886,10 @@ int runOrcLazyJIT(const char *ProgName) {
   // Run destructors.
   ExitOnErr(J->runDestructors());
   CXXRuntimeOverrides.runDestructors();
-
+  auto et_time = std::chrono::high_resolution_clock::now();
+  auto latency =
+    std::chrono::duration_cast<std::chrono::microseconds>(et_time - st_time);
+  llvm::errs() << "\n Application Execution Time "<<latency.count();
   return Result;
 }
 

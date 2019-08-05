@@ -223,6 +223,7 @@ void TextNodeDumper::Visit(const Decl *D) {
     return;
   }
 
+  Context = &D->getASTContext();
   {
     ColorScope Color(OS, ShowColors, DeclKindNameColor);
     OS << D->getDeclKindName() << "Decl";
@@ -445,12 +446,6 @@ void TextNodeDumper::dumpAccessSpecifier(AccessSpecifier AS) {
     OS << "private";
     break;
   }
-}
-
-void TextNodeDumper::dumpCXXTemporary(const CXXTemporary *Temporary) {
-  OS << "(CXXTemporary";
-  dumpPointer(Temporary);
-  OS << ")";
 }
 
 void TextNodeDumper::dumpDeclRef(const Decl *D, StringRef Label) {
@@ -689,6 +684,14 @@ void TextNodeDumper::VisitCaseStmt(const CaseStmt *Node) {
     OS << " gnu_range";
 }
 
+void TextNodeDumper::VisitConstantExpr(const ConstantExpr *Node) {
+  if (Node->getResultAPValueKind() != APValue::None) {
+    ColorScope Color(OS, ShowColors, ValueColor);
+    OS << " ";
+    Node->getAPValueResult().printPretty(OS, *Context, Node->getType());
+  }
+}
+
 void TextNodeDumper::VisitCallExpr(const CallExpr *Node) {
   if (Node->usesADL())
     OS << " adl";
@@ -905,8 +908,9 @@ void TextNodeDumper::VisitCXXConstructExpr(const CXXConstructExpr *Node) {
 
 void TextNodeDumper::VisitCXXBindTemporaryExpr(
     const CXXBindTemporaryExpr *Node) {
-  OS << " ";
-  dumpCXXTemporary(Node->getTemporary());
+  OS << " (CXXTemporary";
+  dumpPointer(Node);
+  OS << ")";
 }
 
 void TextNodeDumper::VisitCXXNewExpr(const CXXNewExpr *Node) {
@@ -1931,4 +1935,8 @@ void TextNodeDumper::VisitBlockDecl(const BlockDecl *D) {
 
   if (D->capturesCXXThis())
     OS << " captures_this";
+}
+
+void TextNodeDumper::VisitConceptDecl(const ConceptDecl *D) {
+  dumpName(D);
 }

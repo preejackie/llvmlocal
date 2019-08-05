@@ -73,7 +73,13 @@ def main():
     sys.exit(1)
   opt_basename = 'opt'
 
-  test_paths = [test for pattern in args.tests for test in glob.glob(pattern)]
+  test_paths = []
+  for test in args.tests:
+    if not glob.glob(test):
+      print('WARNING: Test file \'%s\' was not found. Ignoring it.' % (test,), file=sys.stderr)
+      continue
+    test_paths.append(test)
+
   for test in test_paths:
     if args.verbose:
       print('Scanning for RUN lines in test file: %s' % (test,), file=sys.stderr)
@@ -97,7 +103,7 @@ def main():
     prefix_list = []
     for l in run_lines:
       (tool_cmd, filecheck_cmd) = tuple([cmd.strip() for cmd in l.split('|', 1)])
-
+      common.verify_filecheck_prefixes(filecheck_cmd)
       if not tool_cmd.startswith(opt_basename + ' '):
         print('WARNING: Skipping non-%s RUN line: %s' % (opt_basename, l), file=sys.stderr)
         continue

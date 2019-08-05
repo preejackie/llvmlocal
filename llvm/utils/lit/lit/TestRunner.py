@@ -991,6 +991,7 @@ def _executeShCmd(cmd, shenv, results, timeoutHelper):
     for i,f in stderrTempFiles:
         f.seek(0, 0)
         procData[i] = (procData[i][0], f.read())
+        f.close()
 
     exitCode = None
     for i,(out,err) in enumerate(procData):
@@ -1118,7 +1119,7 @@ def executeScriptInternal(test, litConfig, tmpBase, commands, cwd):
                 codeStr = str(result.exitCode)
             out += "error: command failed with exit status: %s\n" % (
                 codeStr,)
-        if litConfig.maxIndividualTestTime > 0:
+        if litConfig.maxIndividualTestTime > 0 and result.timeoutReached:
             out += 'error: command reached timeout: %s\n' % (
                 str(result.timeoutReached),)
 

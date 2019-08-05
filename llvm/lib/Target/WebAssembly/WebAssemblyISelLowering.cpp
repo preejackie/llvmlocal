@@ -644,13 +644,37 @@ WebAssemblyTargetLowering::LowerCall(CallLoweringInfo &CLI,
   if (CLI.IsPatchPoint)
     fail(DL, DAG, "WebAssembly doesn't support patch point yet");
 
-  // WebAssembly doesn't currently support explicit tail calls. If they are
-  // required, fail. Otherwise, just disable them.
-  if ((CallConv == CallingConv::Fast && CLI.IsTailCall &&
-       MF.getTarget().Options.GuaranteedTailCallOpt) ||
-      (CLI.CS && CLI.CS.isMustTailCall()))
-    fail(DL, DAG, "WebAssembly doesn't support tail call yet");
-  CLI.IsTailCall = false;
+  if (CLI.IsTailCall) {
+    bool MustTail = CLI.CS && CLI.CS.isMustTailCall();
+    if (Subtarget->hasTailCall() && !CLI.IsVarArg) {
+      // Do not tail call unless caller and callee return types match
+      const Function &F = MF.getFunction();
+      const TargetMachine &TM = getTargetMachine();
+      Type *RetTy = F.getReturnType();
+      SmallVector<MVT, 4> CallerRetTys;
+      SmallVector<MVT, 4> CalleeRetTys;
+      computeLegalValueVTs(F, TM, RetTy, CallerRetTys);
+      computeLegalValueVTs(F, TM, CLI.RetTy, CalleeRetTys);
+      bool TypesMatch = CallerRetTys.size() == CalleeRetTys.size() &&
+                        std::equal(CallerRetTys.begin(), CallerRetTys.end(),
+                                   CalleeRetTys.begin());
+      if (!TypesMatch) {
+        // musttail in this case would be an LLVM IR validation failure
+        assert(!MustTail);
+        CLI.IsTailCall = false;
+      }
+    } else {
+      CLI.IsTailCall = false;
+      if (MustTail) {
+        if (CLI.IsVarArg) {
+          // The return would pop the argument buffer
+          fail(DL, DAG, "WebAssembly does not support varargs tail calls");
+        } else {
+          fail(DL, DAG, "WebAssembly 'tail-call' feature not enabled");
+        }
+      }
+    }
+  }
 
   SmallVectorImpl<ISD::InputArg> &Ins = CLI.Ins;
   if (Ins.size() > 1)
@@ -783,6 +807,13 @@ WebAssemblyTargetLowering::LowerCall(CallLoweringInfo &CLI,
     // registers.
     InTys.push_back(In.VT);
   }
+
+  if (CLI.IsTailCall) {
+    // ret_calls do not return values to the current frame
+    SDVTList NodeTys = DAG.getVTList(MVT::Other, MVT::Glue);
+    return DAG.getNode(WebAssemblyISD::RET_CALL, DL, NodeTys, Ops);
+  }
+
   InTys.push_back(MVT::Other);
   SDVTList InTyList = DAG.getVTList(InTys);
   SDValue Res =
