@@ -19,7 +19,7 @@
 
 #include <list>
 #include <string>
-
+#include <chrono>
 using namespace llvm;
 using namespace llvm::orc;
 
@@ -186,6 +186,7 @@ int main(int argc, char *argv[]) {
   ArgV.push_back(nullptr);
 
   // Look up the JIT'd main, cast it to a function pointer, then call it.
+     auto st_time = std::chrono::high_resolution_clock::now();
 
   auto MainSym = ExitOnErr(SJ->lookup("main"));
   int (*Main)(int, const char *[]) =
@@ -193,5 +194,11 @@ int main(int argc, char *argv[]) {
 
   Main(ArgV.size() - 1, ArgV.data());
 
+
+  auto et_time = std::chrono::high_resolution_clock::now();
+  auto latency =
+      std::chrono::duration_cast<std::chrono::microseconds>(et_time - st_time);
+
+  llvm::errs() << "\n Application Execution Time : "<<latency.count();
   return 0;
 }

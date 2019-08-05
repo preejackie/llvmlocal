@@ -57,7 +57,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Instrumentation.h"
 #include <cerrno>
-
+#include <chrono>
 #ifdef __CYGWIN__
 #include <cygwin/version.h>
 #if defined(CYGWIN_VERSION_DLL_MAJOR) && CYGWIN_VERSION_DLL_MAJOR<1007
@@ -865,7 +865,7 @@ int runOrcLazyJIT(const char *ProgName) {
       reinterpret_cast<EntryPointPtr>(static_cast<uintptr_t>(EntryPointSym.getAddress()));
     AltEntryThreads.push_back(std::thread([EntryPoint]() { EntryPoint(); }));
   }
-
+     auto st_time = std::chrono::high_resolution_clock::now();
   // Run main.
   auto MainSym = ExitOnErr(J->lookup("main"));
   typedef int (*MainFnPtr)(int, const char *[]);
@@ -886,7 +886,10 @@ int runOrcLazyJIT(const char *ProgName) {
   // Run destructors.
   ExitOnErr(J->runDestructors());
   CXXRuntimeOverrides.runDestructors();
-
+  auto et_time = std::chrono::high_resolution_clock::now();
+  auto latency =
+    std::chrono::duration_cast<std::chrono::microseconds>(et_time - st_time);
+  llvm::errs() << "\n Application Execution Time "<<latency.count();
   return Result;
 }
 

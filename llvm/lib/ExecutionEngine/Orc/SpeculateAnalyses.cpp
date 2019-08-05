@@ -12,9 +12,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/BlockFrequencyInfo.h"
 
-// ideas:
-// Distance from entry BB
-
+#include <chrono>
 namespace llvm {
 namespace orc {
 
@@ -54,6 +52,8 @@ operator()(Function &F, FunctionAnalysisManager &FAM) {
   DenseSet<StringRef> Calles;
   SmallVector<std::pair<const BasicBlock *, uint64_t>, 8> BBFreqs;
 
+  auto st_time = std::chrono::high_resolution_clock::now();
+
   auto IBBs = findBBwithCalls(F);
 
   if (IBBs.empty())
@@ -73,14 +73,20 @@ operator()(Function &F, FunctionAnalysisManager &FAM) {
              });
 
   // ignoring number of direct calls in a BB
-  auto topk = numBBToGet(BBFreqs.size());
+  auto Topk = numBBToGet(BBFreqs.size());
 
-  for (size_t i = 0; i < topk; i++)
+  for (size_t i = 0; i < Topk; i++)
     findCalles(BBFreqs[i].first, Calles);
 
   assert(!Calles.empty() && "Running Analysis on Function with no calls?");
 
   CallerAndCalles.insert({F.getName(), std::move(Calles)});
+
+  auto et_time = std::chrono::high_resolution_clock::now();
+  auto latency =
+      std::chrono::duration_cast<std::chrono::microseconds>(et_time - st_time);
+  llvm::errs() << "\n Query Analysis for "<<F.getName() << " is : "<<latency.count();
+
 
   return CallerAndCalles;
 }

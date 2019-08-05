@@ -20,7 +20,6 @@
 #include "llvm/ExecutionEngine/Orc/IndirectionUtils.h"
 #include "llvm/ExecutionEngine/Orc/Speculation.h"
 
-#include "llvm/Support/FileOutputBuffer.h"
 namespace llvm {
 
 class Triple;
@@ -185,7 +184,7 @@ private:
 inline std::unique_ptr<LazyReexportsMaterializationUnit>
 lazyReexports(LazyCallThroughManager &LCTManager,
               IndirectStubsManager &ISManager, JITDylib &SourceJD,
-              SymbolAliasMap CallableAliases, ImplSymbolMap *SrcJDLoc,
+              SymbolAliasMap CallableAliases, ImplSymbolMap *SrcJDLoc = nullptr,
               VModuleKey K = VModuleKey()) {
   return llvm::make_unique<LazyReexportsMaterializationUnit>(
       LCTManager, ISManager, SourceJD, std::move(CallableAliases), SrcJDLoc,

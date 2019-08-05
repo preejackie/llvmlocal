@@ -13,13 +13,15 @@
 #ifndef LLVM_EXECUTIONENGINE_ORC_SPECULATION_H
 #define LLVM_EXECUTIONENGINE_ORC_SPECULATION_H
 
+#include "llvm/ExecutionEngine/Orc/Core.h"
+#include "llvm/ExecutionEngine/Orc/IRCompileLayer.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Optional.h"
-#include "llvm/ExecutionEngine/Orc/Core.h"
-#include "llvm/ExecutionEngine/Orc/IRCompileLayer.h"
+#include "llvm/ADT/None.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
+
 #include <mutex>
 #include <type_traits>
 #include <utility>
@@ -51,7 +53,7 @@ private:
     if (Position != Maps.end())
       return Position->getSecond();
     else
-      return {};
+      return None;
   }
 
   std::mutex ConcurrentAccess;
@@ -68,7 +70,7 @@ public:
 private:
   void registerSymbolsWithAddr(TargetFAddr ImplAddr,
                                SymbolNameSet likelySymbols) {
-    std::lock_guard<std::mutex> lockit(ConcurrentAccess);
+    std::lock_guard<std::mutex> Lockit(ConcurrentAccess);
     GlobalSpecMap.insert({ImplAddr, std::move(likelySymbols)});
   }
 
@@ -77,7 +79,7 @@ private:
     // Copy CandidateSet is necessary, to avoid unsynchronized access to
     // the datastructure.
     {
-      std::lock_guard<std::mutex> lockit(ConcurrentAccess);
+      std::lock_guard<std::mutex> Lockit(ConcurrentAccess);
       auto It = GlobalSpecMap.find(FAddr);
       // Kill this when jump on first call instrumentation is in place;
       auto Iv = AlreadyExecuted.insert(FAddr);
@@ -111,7 +113,7 @@ public:
   Speculator(Speculator &&) = delete;
   Speculator &operator=(const Speculator &) = delete;
   Speculator &operator=(Speculator &&) = delete;
-  virtual ~Speculator() {}
+  ~Speculator() {}
 
   // Speculatively compile likely functions for the given Stub Address.
   // destination of __orc_speculate_for jump
